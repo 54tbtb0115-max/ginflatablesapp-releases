@@ -12,7 +12,7 @@ const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消
 
 情况 A（direct，直接生成）——优先选这种：用户的指令已经足够明确，不需要再挑选关键词。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整描述、或用户明显希望直接出图。
 输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "完整的英文绘画提示词", "useLastImage": true 或 false}
-- prompt：结合对话上下文写出完整、具体的英文提示词；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger, filling most of the frame..."）；prompt 末尾固定加上清晰度关键词：sharp focus, highly detailed, crisp clean edges
+- prompt：结合对话上下文写出完整、具体的英文提示词，风格为真实照片而非营销渲染图。除非用户明确要求卡通/插画风，否则遵循纪实写实公式：以 "Wide/Close-up documentary photograph of ..." 开头，用自然光和真实材质质感，结尾加 "Realistic photography, sharp detail"，并在不与需求冲突时补上 no readable text, no logos（画面本就没有人物时才加 no visible faces；用户想要人物则保留并描述自然的姿态）；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger..."）
 - useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
 情况 B（keywords，需要细化）：用户在描述一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时才用。
@@ -31,7 +31,15 @@ const KEYWORD_ONLY_PROMPT = `你是一个 AI 绘画助手。用户会用中文�
 - 每组 2-5 个选项，选项是简短的中文词组
 - 用户描述里明确提到的内容放在对应组的最前面`;
 
-const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Always end the prompt with quality keywords: sharp focus, highly detailed, crisp clean edges, professional quality. Keep it under 130 words.`;
+// 纪实写实风格公式：产品/场景类图片靠这套写法出真实照片效果（参考已验证的高质量产线）
+const REALISM_STYLE_GUIDE = `Write it as a realistic photograph, NOT a marketing render or 3D illustration. Follow these rules:
+- Begin with "Wide documentary photograph of ..." or "Close-up documentary photograph of ..." depending on framing.
+- Use natural lighting (bright daylight / soft daylight through windows), realistic materials and textures, believable real-world setting.
+- End with: Realistic photography, sharp detail.
+- To avoid AI artifacts, append these negatives WHEN they do not conflict with the request: no readable text, no logos, no flags. Only add "no visible faces" if the scene has NO people the user actually wants; if the user explicitly wants people/children, keep them but describe natural, candid poses.
+- Avoid over-saturated cartoon colors, rainbows, and obviously composited elements unless explicitly requested.`;
+
+const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for a photo-realistic image generation model. Output ONLY the prompt text, no quotes, no explanations. Include subject, scene, lighting, composition, concisely and vividly. If the request is based on a reference image, phrase it as an edit instruction of that image while keeping the described realistic-photo style. ${REALISM_STYLE_GUIDE} Keep it under 130 words.`;
 
 const apiHeaders = (): Record<string, string> => ({
     'Content-Type': 'application/json',
