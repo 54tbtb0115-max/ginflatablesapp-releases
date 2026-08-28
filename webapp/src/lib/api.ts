@@ -18,6 +18,8 @@ export const api = {
     login: (username: string, password: string) =>
         request<{ user: User }>('/api/auth/login', json({ username, password })),
     logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+    changePassword: (oldPassword: string, newPassword: string) =>
+        request<{ ok: boolean }>('/api/account/password', json({ oldPassword, newPassword })),
     keywordStats: () => request<{ stats: KeywordStat[]; total: number }>('/api/keywords/stats'),
     listConversations: () => request<{ conversations: Conversation[] }>('/api/conversations'),
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),

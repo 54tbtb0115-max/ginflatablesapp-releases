@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
-import { generateImage, planTurn, refinePrompt, type HistoryEntry } from './ai';
-import { SESSION_DAYS, createSession, deleteSession, loginUser, sessionUser } from './auth';
+import { generateImage, planTurn, refinePrompt, summarizeKeywords, type HistoryEntry } from './ai';
+import { SESSION_DAYS, changePassword, createSession, deleteSession, loginUser, sessionUser } from './auth';
 import { config } from './env';
 import { db } from './db';
 import { storage } from './storage';
@@ -52,6 +52,13 @@ app.post('/api/auth/logout', (c) => {
     const token = getCookie(c, 'sid');
     if (token) deleteSession(token);
     deleteCookie(c, 'sid', { path: '/' });
+    return c.json({ ok: true });
+});
+
+// 修改密码（路径不在 /api/auth/ 下，走登录鉴权）
+app.post('/api/account/password', async (c) => {
+    const { oldPassword, newPassword } = await c.req.json<{ oldPassword: string; newPassword: string }>();
+    changePassword(c.get('userId'), oldPassword ?? '', newPassword ?? '');
     return c.json({ ok: true });
 });
 
@@ -235,7 +242,9 @@ app.post('/api/conversations/:id/chat', async (c) => {
         db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.trim().slice(0, 20), conversationId);
     }
 
-    const plan = await planTurn(history, text.trim());
+    // 会话里还没生成过图片 → 一律先给关键词挑选；有图之后细化指令才直接生成
+    const hasImage = lastImageId(conversationId) !== undefined;
+    const plan = hasImage ? await planTurn(history, text.trim()) : await summarizeKeywords(history, text.trim());
 
     // 指令明确：跳过关键词挑选，直接生成
     if (plan.mode === 'direct') {

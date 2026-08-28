@@ -19,7 +19,17 @@ const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消
 输出格式：{"mode": "keywords", "reply": "一句简短的中文回应", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
 - 分组固定为：场景、主体、风格、光线、构图；每组 2-5 个简短中文词组选项；用户明确提到的内容放在对应组最前面
 
-判断原则：能直接做就直接做（direct），不要动不动让用户选关键词；只有全新且模糊的场景描述才用 keywords。`;
+判断原则：对已有图片的修改和细化指令用 direct；描述全新画面时用 keywords。`;
+
+const KEYWORD_ONLY_PROMPT = `你是一个 AI 绘画助手。用户会用中文描述想要生成的画面，你要结合本次对话的上下文，把描述总结成可勾选的关键词，供用户挑选后交给绘画模型。
+
+必须只输出一个 JSON 对象，不要输出任何其他文字、不要用 markdown 代码块。格式：
+{"reply": "一句简短的中文回应，说明你的理解", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
+
+要求：
+- 分组固定为：场景、主体、风格、光线、构图；某组没有信息时给出 2-3 个合理的推荐选项
+- 每组 2-5 个选项，选项是简短的中文词组
+- 用户描述里明确提到的内容放在对应组的最前面`;
 
 const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Keep it under 120 words.`;
 
@@ -61,7 +71,25 @@ export type TurnPlan =
     | { mode: 'keywords'; reply: string; groups: KeywordGroup[] }
     | { mode: 'direct'; reply: string; promptEn: string; useLastImage: boolean };
 
-// 判断这轮该直接生成还是给出关键词供挑选
+function parseKeywordGroups(parsed: { groups?: { name?: string; options?: unknown[] }[] }): KeywordGroup[] {
+    return (parsed.groups ?? [])
+        .map((g) => ({
+            name: String(g.name ?? '').trim(),
+            options: (g.options ?? []).map((o) => String(o).trim()).filter(Boolean).slice(0, 6),
+        }))
+        .filter((g) => g.name && g.options.length > 0);
+}
+
+// 会话首次生成前用：只总结关键词，不做直接生成
+export async function summarizeKeywords(history: HistoryEntry[], userText: string): Promise<TurnPlan> {
+    const raw = await runTextModel(KEYWORD_ONLY_PROMPT, history, userText);
+    const parsed = extractJson(raw) as { reply?: string; groups?: { name?: string; options?: unknown[] }[] };
+    const groups = parseKeywordGroups(parsed);
+    if (groups.length === 0) throw new Error('关键词解析失败');
+    return { mode: 'keywords', reply: String(parsed.reply ?? '这是我总结的关键词，请挑选后生成。'), groups };
+}
+
+// 已有图片后用：判断这轮该直接生成还是给出关键词供挑选
 export async function planTurn(history: HistoryEntry[], userText: string): Promise<TurnPlan> {
     const raw = await runTextModel(PLAN_SYSTEM_PROMPT, history, userText);
     const parsed = extractJson(raw) as {
@@ -82,12 +110,7 @@ export async function planTurn(history: HistoryEntry[], userText: string): Promi
         };
     }
 
-    const groups: KeywordGroup[] = (parsed.groups ?? [])
-        .map((g) => ({
-            name: String(g.name ?? '').trim(),
-            options: (g.options ?? []).map((o) => String(o).trim()).filter(Boolean).slice(0, 6),
-        }))
-        .filter((g) => g.name && g.options.length > 0);
+    const groups = parseKeywordGroups(parsed);
     if (groups.length === 0) throw new Error('关键词解析失败');
     return { mode: 'keywords', reply: String(parsed.reply ?? '这是我总结的关键词，请挑选后生成。'), groups };
 }

@@ -46,6 +46,15 @@ export function loginUser(username: string, password: string): AuthUser {
     return { id: row.id, username: row.username };
 }
 
+export function changePassword(userId: string, oldPassword: string, newPassword: string): void {
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as
+        | { password_hash: string | null }
+        | undefined;
+    if (!row?.password_hash || !verifyPassword(oldPassword, row.password_hash)) throw new Error('旧密码不正确');
+    if (newPassword.length < 6) throw new Error('新密码至少 6 位');
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), userId);
+}
+
 export function createSession(userId: string): string {
     const token = randomBytes(32).toString('hex');
     const now = Date.now();
