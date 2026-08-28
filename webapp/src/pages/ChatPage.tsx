@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import type { Conversation, KeywordsContent, Message } from '../../shared/types';
 import { imageUrl } from '../../shared/types';
+import Logo from '../components/Logo';
 import { api } from '../lib/api';
 
 type Busy = 'idle' | 'thinking' | 'generating';
@@ -334,8 +335,8 @@ function ChatWindow({
 function EmptyState() {
     return (
         <div className="h-full flex flex-col items-center justify-center text-center text-gray-400">
-            <div className="h-16 w-16 rounded-2xl bg-violet-500/10 text-violet-500 flex items-center justify-center mb-4">
-                <i className="ri-brush-ai-line text-3xl" aria-hidden />
+            <div className="mb-4">
+                <Logo size={64} />
             </div>
             <p className="max-w-sm text-sm leading-6">
                 用一句话描述你想要的画面，AI 会先总结出场景、主体、风格等关键词，
@@ -383,7 +384,7 @@ function MessageBubble({
                 <div className="flex justify-start my-3">
                     <div className="w-[280px] h-[180px] rounded-lg bg-slate-50 dark:bg-zinc-700 flex flex-col items-center justify-center gap-2 text-sm text-gray-400">
                         <i className="ri-loader-4-line animate-spin text-2xl text-violet-500" aria-hidden />
-                        正在生成图片…（切换页面也不会中断）
+                        正在生成图片…
                     </div>
                 </div>
             );

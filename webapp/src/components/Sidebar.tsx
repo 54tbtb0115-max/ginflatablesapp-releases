@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import type { User } from '../../shared/types';
 import { api } from '../lib/api';
+import Logo from './Logo';
 
 // 左侧图标导航栏，样式参考 Chatvia：桌面端 75px 竖排，移动端置底横排
 export default function Sidebar({
@@ -24,8 +25,8 @@ export default function Sidebar({
 
     return (
         <nav className="w-full lg:w-[75px] shrink-0 bg-violet-500 shadow flex flex-row lg:flex-col items-center justify-between z-40">
-            <div className="hidden lg:flex my-5 h-9 w-9 items-center justify-center rounded-lg bg-white/20 text-white">
-                <i className="ri-brush-ai-line text-xl" aria-hidden />
+            <div className="hidden lg:block my-5" title="AI 画室">
+                <Logo size={38} />
             </div>
 
             <ul className="flex flex-row lg:flex-col justify-center w-full lg:my-auto">

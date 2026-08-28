@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { User } from '../../shared/types';
 import { api } from '../lib/api';
+import Logo from '../components/Logo';
 
 // 登录页：账号由管理员创建分发，不开放注册
 export default function LoginPage({ onLogin }: { onLogin: (user: User) => void }) {
@@ -28,8 +29,8 @@ export default function LoginPage({ onLogin }: { onLogin: (user: User) => void }
         <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-zinc-900 px-4">
             <div className="w-full max-w-md">
                 <div className="text-center mb-8">
-                    <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-500 text-white mb-4">
-                        <i className="ri-brush-ai-line text-2xl" aria-hidden />
+                    <div className="inline-flex mb-4">
+                        <Logo size={64} />
                     </div>
                     <h4 className="text-gray-700 dark:text-gray-50">AI 画室</h4>
                     <p className="text-sm text-gray-400 mt-1">登录后开始创作，账号由管理员分配</p>
