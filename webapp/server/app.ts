@@ -172,6 +172,9 @@ function updateMessageContent(messageId: string, content: unknown): void {
     db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(JSON.stringify(content), messageId);
 }
 
+// 进行中的生成任务：消息 id → AbortController，用于「停止生成」
+const activeGenerations = new Map<string, AbortController>();
+
 // 后台生成：先插入一条"生成中"的图片消息并立刻返回，生成在后台继续，
 // 完成/失败后更新这条消息——用户切换页面、换会话、刷新都不影响生成
 function startGeneration(opts: {
@@ -194,6 +197,8 @@ function startGeneration(opts: {
         sourceImageId: opts.sourceImageId,
     };
     const message = insertMessage(opts.conversationId, 'assistant', 'image', { ...base, status: 'pending' });
+    const controller = new AbortController();
+    activeGenerations.set(message.id, controller);
 
     void (async () => {
         try {
@@ -203,11 +208,12 @@ function startGeneration(opts: {
                 if (!source) throw new Error('参考图不存在或文件丢失');
             }
 
-            const { bytes, contentType } = await generateImage(opts.promptEn, source, {
-                api: spec.api,
-                model: spec.model,
-                size: spec.size,
-            });
+            const { bytes, contentType } = await generateImage(
+                opts.promptEn,
+                source,
+                { api: spec.api, model: spec.model, size: spec.size },
+                controller.signal
+            );
             const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
             const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
             await storage.put(r2Key, bytes, contentType);
@@ -244,12 +250,19 @@ function startGeneration(opts: {
 
             updateMessageContent(message.id, base);
         } catch (err) {
-            console.error('生成失败:', err);
-            updateMessageContent(message.id, {
-                ...base,
-                status: 'failed',
-                error: err instanceof Error ? err.message : '生成失败',
-            });
+            const aborted = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
+            if (aborted) {
+                updateMessageContent(message.id, { ...base, status: 'failed', error: '已停止生成' });
+            } else {
+                console.error('生成失败:', err);
+                updateMessageContent(message.id, {
+                    ...base,
+                    status: 'failed',
+                    error: err instanceof Error ? err.message : '生成失败',
+                });
+            }
+        } finally {
+            activeGenerations.delete(message.id);
         }
     })();
 
@@ -284,9 +297,19 @@ app.post('/api/conversations/:id/chat', async (c) => {
         db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.trim().slice(0, 20), conversationId);
     }
 
-    // 会话里还没生成过图片 → 一律先给关键词挑选；有图之后细化指令才直接生成
     const hasImage = lastImageId(conversationId) !== undefined;
-    const plan = hasImage ? await planTurn(history, text.trim()) : await summarizeKeywords(history, text.trim());
+    let plan = await planTurn(history, text.trim());
+
+    // 不是画图需求 → 只回复文字，不生成图片
+    if (plan.mode === 'chat') {
+        const replyMessage = insertMessage(conversationId, 'assistant', 'text', { text: plan.reply });
+        return c.json({ messages: [userMessage, replyMessage] });
+    }
+
+    // 会话里还没生成过图片时，画新图一律先走关键词挑选（把 direct 转为 keywords）
+    if (plan.mode === 'direct' && !hasImage) {
+        plan = await summarizeKeywords(history, text.trim());
+    }
 
     // 指令明确：跳过关键词挑选，直接生成
     if (plan.mode === 'direct') {
@@ -341,6 +364,27 @@ app.post('/api/conversations/:id/generate', async (c) => {
     });
 
     return c.json({ messages: [userMessage, imageMessage] });
+});
+
+// ---------- 停止生成 ----------
+app.post('/api/conversations/:id/cancel', async (c) => {
+    const conversationId = c.req.param('id');
+    ownedConversation(c.get('userId'), conversationId);
+    const { messageId } = await c.req.json<{ messageId: string }>();
+    const controller = activeGenerations.get(messageId);
+    if (controller) controller.abort();
+    // 立即把这条消息标记为已停止，前端马上更新（后台任务也会走 aborted 分支）
+    const row = db.prepare('SELECT content FROM messages WHERE id = ? AND conversation_id = ?').get(
+        messageId,
+        conversationId
+    ) as { content: string } | undefined;
+    if (row) {
+        const content = JSON.parse(row.content);
+        if (content.status === 'pending') {
+            updateMessageContent(messageId, { ...content, status: 'failed', error: '已停止生成' });
+        }
+    }
+    return c.json({ ok: true });
 });
 
 // ---------- 可选的生图模型列表 ----------

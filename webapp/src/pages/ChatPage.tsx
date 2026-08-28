@@ -162,6 +162,18 @@ export default function ChatPage() {
         }
     };
 
+    // 停止生成：取消进行中的这张图
+    const cancelGen = async (messageId: string) => {
+        if (!activeId) return;
+        try {
+            await api.cancel(activeId, messageId);
+            const { messages } = await api.listMessages(activeId);
+            if (activeIdRef.current === activeId) setMessages(messages);
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    };
+
     // 高清重生成：用更强的模型 + 更高分辨率按原提示词重制这张图（单独计费，仅点击时使用）
     const hdRegen = async (imageId: string) => {
         if (!activeId) return;
@@ -208,6 +220,7 @@ export default function ChatPage() {
                 onGenerate={generate}
                 onUpload={uploadReference}
                 onHd={hdRegen}
+                onCancel={cancelGen}
                 bottomRef={bottomRef}
             />
         </div>
@@ -276,6 +289,7 @@ function ChatWindow({
     onGenerate,
     onUpload,
     onHd,
+    onCancel,
     bottomRef,
 }: {
     messages: Message[];
@@ -291,6 +305,7 @@ function ChatWindow({
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUpload: (file: File) => void;
     onHd: (imageId: string) => void;
+    onCancel: (messageId: string) => void;
     bottomRef: React.RefObject<HTMLDivElement>;
 }) {
     const [input, setInput] = useState('');
@@ -332,6 +347,7 @@ function ChatWindow({
                         onGenerate={onGenerate}
                         onUseAsRef={onUseAsRef}
                         onHd={onHd}
+                        onCancel={onCancel}
                     />
                 ))}
                 {busy === 'thinking' && <PendingBubble text="思考中…" />}
@@ -459,12 +475,14 @@ function MessageBubble({
     onGenerate,
     onUseAsRef,
     onHd,
+    onCancel,
 }: {
     message: Message;
     busy: Busy;
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUseAsRef: (id: string) => void;
     onHd: (imageId: string) => void;
+    onCancel: (messageId: string) => void;
 }) {
     const mine = message.role === 'user';
 
@@ -480,9 +498,16 @@ function MessageBubble({
         if (message.content.status === 'pending') {
             return (
                 <div className="flex justify-start my-3">
-                    <div className="w-[280px] h-[180px] rounded-lg bg-slate-50 dark:bg-zinc-700 flex flex-col items-center justify-center gap-2 text-sm text-gray-400">
+                    <div className="w-[280px] h-[180px] rounded-lg bg-slate-50 dark:bg-zinc-700 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
                         <i className="ri-loader-4-line animate-spin text-2xl text-violet-500" aria-hidden />
                         正在生成图片…
+                        <button
+                            onClick={() => onCancel(message.id)}
+                            className="rounded-md border border-slate-300 dark:border-zinc-500 px-3 py-1 text-xs text-gray-500 dark:text-gray-300 hover:border-red-400 hover:text-red-500 transition-colors"
+                        >
+                            <i className="ri-stop-circle-line mr-1" aria-hidden />
+                            停止生成
+                        </button>
                     </div>
                 </div>
             );

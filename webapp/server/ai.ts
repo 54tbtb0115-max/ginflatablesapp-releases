@@ -8,18 +8,21 @@ import { config } from './env';
 
 export type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
-const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消息后，你要结合本次对话的上下文判断怎么响应，并且必须只输出一个 JSON 对象（不要任何其他文字、不要 markdown 代码块）。有两种情况：
+const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消息后，你要结合本次对话的上下文判断怎么响应，并且必须只输出一个 JSON 对象（不要任何其他文字、不要 markdown 代码块）。有三种情况：
 
-情况 A（direct，直接生成）——优先选这种：用户的指令已经足够明确，不需要再挑选关键词。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整描述、或用户明显希望直接出图。
+情况 C（chat，只聊天不画图）——最优先判断：当用户这条消息并不是要生成或修改图片时，一律用这种，绝不生成图片。典型例子：打招呼、道谢、闲聊、提问、发的是命令或代码、无意义文字、明确表示"不用生成了/停一下/不画了"、或在讨论而非下达绘图指令。
+输出格式：{"mode": "chat", "reply": "一句自然的中文回应"}
+
+情况 A（direct，直接生成）：用户明确要求生成或修改图片，且指令已经足够明确。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整画面描述。
 输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "完整的英文绘画提示词", "useLastImage": true 或 false}
 - prompt：结合对话上下文写出完整、具体的英文提示词，风格为真实照片而非营销渲染图。除非用户明确要求卡通/插画风，否则遵循纪实写实公式：以 "Wide/Close-up documentary photograph of ..." 开头，用自然光和真实材质质感，结尾加 "Realistic photography, sharp detail"，并在不与需求冲突时补上 no readable text, no logos（画面本就没有人物时才加 no visible faces；用户想要人物则保留并描述自然的姿态）；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger..."）
 - useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
-情况 B（keywords，需要细化）：用户在描述一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时才用。
+情况 B（keywords，需要细化）：用户要画一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时用。
 输出格式：{"mode": "keywords", "reply": "一句简短的中文回应", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
 - 分组固定为：场景、主体、风格、光线、构图；每组 2-5 个简短中文词组选项；用户明确提到的内容放在对应组最前面
 
-判断原则：对已有图片的修改和细化指令用 direct；描述全新画面时用 keywords。`;
+判断原则：先判断是不是画图需求——不是就用 chat；是画图需求时，对已有图片的修改和明确的具体指令用 direct，描述全新画面时用 keywords。`;
 
 const KEYWORD_ONLY_PROMPT = `你是一个 AI 绘画助手。用户会用中文描述想要生成的画面，你要结合本次对话的上下文，把描述总结成可勾选的关键词，供用户挑选后交给绘画模型。
 
@@ -76,6 +79,7 @@ async function runTextModel(system: string, history: HistoryEntry[], user: strin
 }
 
 export type TurnPlan =
+    | { mode: 'chat'; reply: string }
     | { mode: 'keywords'; reply: string; groups: KeywordGroup[] }
     | { mode: 'direct'; reply: string; promptEn: string; useLastImage: boolean };
 
@@ -89,7 +93,10 @@ function parseKeywordGroups(parsed: { groups?: { name?: string; options?: unknow
 }
 
 // 会话首次生成前用：只总结关键词，不做直接生成
-export async function summarizeKeywords(history: HistoryEntry[], userText: string): Promise<TurnPlan> {
+export async function summarizeKeywords(
+    history: HistoryEntry[],
+    userText: string
+): Promise<{ mode: 'keywords'; reply: string; groups: KeywordGroup[] }> {
     const raw = await runTextModel(KEYWORD_ONLY_PROMPT, history, userText);
     const parsed = extractJson(raw) as { reply?: string; groups?: { name?: string; options?: unknown[] }[] };
     const groups = parseKeywordGroups(parsed);
@@ -107,6 +114,10 @@ export async function planTurn(history: HistoryEntry[], userText: string): Promi
         useLastImage?: boolean;
         groups?: { name?: string; options?: unknown[] }[];
     };
+
+    if (parsed.mode === 'chat' && !parsed.prompt && !parsed.groups) {
+        return { mode: 'chat', reply: String(parsed.reply ?? '好的。') };
+    }
 
     if (parsed.mode === 'direct' || (parsed.prompt && !parsed.groups)) {
         if (!parsed.prompt) throw new Error('模型未返回提示词');
@@ -140,12 +151,13 @@ type GeminiPart = {
 export async function generateImage(
     promptEn: string,
     source: { bytes: Uint8Array; contentType: string } | undefined,
-    spec: { api: 'gemini' | 'openai'; model: string; size: string | null }
+    spec: { api: 'gemini' | 'openai'; model: string; size: string | null },
+    signal?: AbortSignal
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
     const { model, size } = spec;
 
     if (spec.api === 'openai') {
-        return generateImageOpenAI(model, size, promptEn, source);
+        return generateImageOpenAI(model, size, promptEn, source, signal);
     }
 
     const imageSize = size;
@@ -162,6 +174,7 @@ export async function generateImage(
     const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: apiHeaders(),
+        signal,
         body: JSON.stringify({
             contents: [{ role: 'user', parts }],
             generationConfig,
@@ -193,7 +206,8 @@ async function generateImageOpenAI(
     model: string,
     imageSize: string | null,
     promptEn: string,
-    source?: { bytes: Uint8Array; contentType: string }
+    source?: { bytes: Uint8Array; contentType: string },
+    signal?: AbortSignal
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
     // OpenAI 尺寸格式为 宽x高（如 1024x1024），非 1K/2K；不是该格式则用 auto
     const size = imageSize && /^\d+x\d+$/.test(imageSize) ? imageSize : 'auto';
@@ -208,12 +222,13 @@ async function generateImageOpenAI(
         form.append('size', size);
         form.append('n', '1');
         form.append('image', new Blob([source.bytes], { type: source.contentType }), 'image.png');
-        res = await fetch(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form });
+        res = await fetch(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form, signal });
     } else {
         res = await fetch(`${config.ai.baseUrl}/v1/images/generations`, {
             method: 'POST',
             headers: { ...auth, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, prompt: promptEn, size, n: 1 }),
+            signal,
         });
     }
 

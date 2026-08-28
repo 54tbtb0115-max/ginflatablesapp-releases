@@ -43,6 +43,8 @@ export const api = {
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),
     hdRegenerate: (conversationId: string, imageId: string) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/hd`, json({ imageId })),
+    cancel: (conversationId: string, messageId: string) =>
+        request<{ ok: boolean }>(`/api/conversations/${conversationId}/cancel`, json({ messageId })),
     upload: (conversationId: string, file: File) =>
         request<{ imageId: string; message: Message }>(`/api/conversations/${conversationId}/upload`, {
             method: 'POST',
