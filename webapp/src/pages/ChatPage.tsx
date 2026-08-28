@@ -208,11 +208,21 @@ function ChatWindow({
 }) {
     const [input, setInput] = useState('');
     const fileRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
+
+    // 输入框随内容自动增高（约 5 行封顶，超出后内部滚动）
+    const resizeInput = () => {
+        const ta = inputRef.current;
+        if (!ta) return;
+        ta.style.height = 'auto';
+        ta.style.height = `${Math.min(ta.scrollHeight, 150)}px`;
+    };
 
     const submit = () => {
         const text = input.trim();
         if (!text || busy !== 'idle') return;
         setInput('');
+        if (inputRef.current) inputRef.current.style.height = 'auto';
         onSend(text);
     };
 
@@ -274,8 +284,12 @@ function ChatWindow({
                         }}
                     />
                     <textarea
+                        ref={inputRef}
                         value={input}
-                        onChange={(e) => setInput(e.target.value)}
+                        onChange={(e) => {
+                            setInput(e.target.value);
+                            resizeInput();
+                        }}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter' && !e.shiftKey) {
                                 e.preventDefault();
@@ -283,8 +297,8 @@ function ChatWindow({
                             }
                         }}
                         rows={1}
-                        placeholder="描述你想要的画面，例如：黄昏的海边有一座充气城堡…"
-                        className="flex-1 resize-none rounded-lg border-0 bg-slate-50 dark:bg-zinc-700 dark:text-gray-100 placeholder:text-gray-400 focus:ring-violet-500 px-4 py-2.5"
+                        placeholder="描述你想要的画面，例如：黄昏的海边有一座充气城堡…（Shift+回车换行）"
+                        className="flex-1 resize-none overflow-y-auto scrollbar-thin rounded-lg border-0 bg-slate-50 dark:bg-zinc-700 dark:text-gray-100 placeholder:text-gray-400 focus:ring-violet-500 px-4 py-2.5"
                     />
                     <button
                         onClick={submit}
