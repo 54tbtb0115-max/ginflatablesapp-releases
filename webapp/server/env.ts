@@ -14,6 +14,8 @@ export const config = {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean),
+    // HTTP(S) 代理地址，如 http://192.168.100.194:7890，留空则直连
+    httpsProxy: (process.env.HTTPS_PROXY || process.env.https_proxy || '').trim(),
     ai: {
         baseUrl: (process.env.AI_BASE_URL ?? 'https://aiberm.com').replace(/\/$/, ''),
         apiKey: required('AI_API_KEY'),
