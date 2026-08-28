@@ -20,14 +20,24 @@ export const config = {
         baseUrl: (process.env.AI_BASE_URL ?? 'https://aiberm.com').replace(/\/$/, ''),
         apiKey: required('AI_API_KEY'),
         textModel: process.env.TEXT_MODEL ?? 'google/gemini-2.5-flash',
-        imageModel: process.env.IMAGE_MODEL ?? 'gemini-2.5-flash-image',
-        // 生图接口风格：'gemini'（原生 generateContent）| 'openai'（/v1/images，更写实的 gpt-image 走这个）
-        imageApi: (process.env.IMAGE_API ?? 'gemini').toLowerCase() as 'gemini' | 'openai',
-        // 输出分辨率（1K/2K/4K），仅 gemini-3-pro-image 系列支持；留空则用模型默认
-        imageSize: process.env.IMAGE_SIZE || null,
-        // 「高清重生成」用的模型与分辨率（按次计费更贵，仅在用户点高清按钮时使用）
-        hdImageModel: process.env.HD_IMAGE_MODEL ?? 'gemini-3-pro-image-preview',
-        hdImageSize: process.env.HD_IMAGE_SIZE || '2K',
+        // 可在发送时选择的生图模型列表；模型名/尺寸可用环境变量覆盖，默认开箱即用
+        imageModels: [
+            {
+                id: 'realistic',
+                label: '写实（gpt-image-2）',
+                api: 'openai' as const,
+                model: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
+                size: process.env.OPENAI_IMAGE_SIZE || 'auto',
+            },
+            {
+                id: 'fast',
+                label: '快速（Gemini）',
+                api: 'gemini' as const,
+                model: process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
+                size: process.env.GEMINI_IMAGE_SIZE || null,
+            },
+        ],
+        defaultModelId: process.env.DEFAULT_IMAGE_MODEL ?? 'realistic',
     },
     r2:
         process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET
@@ -40,3 +50,14 @@ export const config = {
             : null,
     localStorageDir: process.env.LOCAL_STORAGE_DIR ?? 'data/images',
 };
+
+export type ImageModelSpec = (typeof config.ai.imageModels)[number];
+
+// 按 id 解析选中的生图模型；未指定或找不到时用默认
+export function resolveImageModel(id?: string): ImageModelSpec {
+    return (
+        config.ai.imageModels.find((m) => m.id === id) ??
+        config.ai.imageModels.find((m) => m.id === config.ai.defaultModelId) ??
+        config.ai.imageModels[0]
+    );
+}

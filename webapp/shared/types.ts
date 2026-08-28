@@ -60,7 +60,10 @@ export type GenerateRequest = {
     selected: Record<string, string[]>;
     note?: string;
     sourceImageId?: string;
+    modelId?: string;
 };
+
+export type ImageModelOption = { id: string; label: string };
 
 export type User = { id: string; username: string };
 

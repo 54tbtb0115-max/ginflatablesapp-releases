@@ -4,7 +4,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
 import { generateImage, planTurn, refinePrompt, summarizeKeywords, type HistoryEntry } from './ai';
 import { SESSION_DAYS, changePassword, createSession, deleteSession, loginUser, sessionUser } from './auth';
-import { config } from './env';
+import { config, resolveImageModel } from './env';
 import { db } from './db';
 import { storage } from './storage';
 
@@ -181,10 +181,11 @@ function startGeneration(opts: {
     promptEn: string;
     selected?: Record<string, string[]>;
     sourceImageId?: string;
-    // 高清模式：用 HD 模型与更高分辨率重制
-    hd?: boolean;
+    // 用户选择的生图模型 id（realistic / fast）
+    modelId?: string;
 }): Message {
-    const model = opts.hd ? config.ai.hdImageModel : config.ai.imageModel;
+    const spec = resolveImageModel(opts.modelId);
+    const model = spec.model;
     const imageId = randomUUID();
     const base = {
         imageId,
@@ -202,11 +203,11 @@ function startGeneration(opts: {
                 if (!source) throw new Error('参考图不存在或文件丢失');
             }
 
-            const { bytes, contentType } = await generateImage(
-                opts.promptEn,
-                source,
-                opts.hd ? { model, imageSize: config.ai.hdImageSize } : undefined
-            );
+            const { bytes, contentType } = await generateImage(opts.promptEn, source, {
+                api: spec.api,
+                model: spec.model,
+                size: spec.size,
+            });
             const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
             const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
             await storage.put(r2Key, bytes, contentType);
@@ -268,7 +269,11 @@ app.post('/api/conversations/:id/chat', async (c) => {
     const conversationId = c.req.param('id');
     const userId = c.get('userId');
     ownedConversation(userId, conversationId);
-    const { text, sourceImageId } = await c.req.json<{ text: string; sourceImageId?: string }>();
+    const { text, sourceImageId, modelId } = await c.req.json<{
+        text: string;
+        sourceImageId?: string;
+        modelId?: string;
+    }>();
     if (!text?.trim()) return c.json({ error: '内容不能为空' }, 400);
 
     const history = buildHistory(conversationId);
@@ -293,6 +298,7 @@ app.post('/api/conversations/:id/chat', async (c) => {
             promptCn: text.trim(),
             promptEn: plan.promptEn,
             sourceImageId: source,
+            modelId,
         });
         return c.json({ messages: [userMessage, replyMessage, imageMessage] });
     }
@@ -331,9 +337,18 @@ app.post('/api/conversations/:id/generate', async (c) => {
         promptEn,
         selected: body.selected,
         sourceImageId: body.sourceImageId,
+        modelId: body.modelId,
     });
 
     return c.json({ messages: [userMessage, imageMessage] });
+});
+
+// ---------- 可选的生图模型列表 ----------
+app.get('/api/models', (c) => {
+    return c.json({
+        models: config.ai.imageModels.map((m) => ({ id: m.id, label: m.label })),
+        defaultModelId: config.ai.defaultModelId,
+    });
 });
 
 // ---------- 关键词统计：所有用户选过的关键词按使用次数排行 ----------
@@ -376,7 +391,7 @@ app.post('/api/conversations/:id/hd', async (c) => {
         promptCn: `高清重制：${row.prompt ?? ''}`,
         promptEn,
         sourceImageId: row.id,
-        hd: true,
+        modelId: 'realistic',
     });
     return c.json({ messages: [message] });
 });

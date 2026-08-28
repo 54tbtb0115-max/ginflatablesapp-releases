@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import type { Conversation, KeywordsContent, Message } from '../../shared/types';
+import type { Conversation, ImageModelOption, KeywordsContent, Message } from '../../shared/types';
 import { imageUrl } from '../../shared/types';
 import Logo from '../components/Logo';
 import { api } from '../lib/api';
@@ -18,10 +18,22 @@ export default function ChatPage() {
     const [refImageId, setRefImageId] = useState<string | null>(
         (location.state as { refImageId?: string } | null)?.refImageId ?? null
     );
+    // 生图模型选择（发送时生效）
+    const [models, setModels] = useState<ImageModelOption[]>([]);
+    const [modelId, setModelId] = useState<string>('');
     const bottomRef = useRef<HTMLDivElement>(null);
     // 防止请求返回时用户已切到别的会话，把消息插错地方
     const activeIdRef = useRef<string | null>(null);
     activeIdRef.current = activeId;
+
+    useEffect(() => {
+        api.models()
+            .then(({ models, defaultModelId }) => {
+                setModels(models);
+                setModelId((cur) => cur || defaultModelId || models[0]?.id || '');
+            })
+            .catch(() => {});
+    }, []);
 
     useEffect(() => {
         api.listConversations()
@@ -84,7 +96,7 @@ export default function ChatPage() {
         setBusy('thinking');
         try {
             const id = await ensureConversation();
-            const { messages: newMessages } = await api.chat(id, text, refImageId ?? undefined);
+            const { messages: newMessages } = await api.chat(id, text, refImageId ?? undefined, modelId);
             if (activeIdRef.current === id) setMessages((ms) => [...ms, ...newMessages]);
             // AI 判断为明确指令时会直接返回生成的图片，此时参考图已被使用
             if (newMessages.some((m) => m.type === 'image')) setRefImageId(null);
@@ -107,6 +119,7 @@ export default function ChatPage() {
                 selected,
                 note: note || undefined,
                 sourceImageId: refImageId ?? undefined,
+                modelId,
             });
             if (activeIdRef.current === activeId) setMessages((ms) => [...ms, ...newMessages]);
             setRefImageId(null);
@@ -154,6 +167,9 @@ export default function ChatPage() {
                 busy={busy}
                 error={error}
                 refImageId={refImageId}
+                models={models}
+                modelId={modelId}
+                onModelChange={setModelId}
                 onClearRef={() => setRefImageId(null)}
                 onUseAsRef={setRefImageId}
                 onSend={sendText}
@@ -219,6 +235,9 @@ function ChatWindow({
     busy,
     error,
     refImageId,
+    models,
+    modelId,
+    onModelChange,
     onClearRef,
     onUseAsRef,
     onSend,
@@ -231,6 +250,9 @@ function ChatWindow({
     busy: Busy;
     error: string | null;
     refImageId: string | null;
+    models: ImageModelOption[];
+    modelId: string;
+    onModelChange: (id: string) => void;
     onClearRef: () => void;
     onUseAsRef: (id: string) => void;
     onSend: (text: string) => void;
@@ -304,6 +326,26 @@ function ChatWindow({
             )}
 
             <div className="px-4 lg:px-6 py-4 border-t border-slate-100 dark:border-zinc-600 mb-[60px] lg:mb-0">
+                {models.length > 1 && (
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs text-gray-400">生图模型</span>
+                        <div className="inline-flex rounded-lg bg-slate-100 dark:bg-zinc-700 p-0.5">
+                            {models.map((m) => (
+                                <button
+                                    key={m.id}
+                                    onClick={() => onModelChange(m.id)}
+                                    className={`px-3 py-1 rounded-md text-xs transition-colors ${
+                                        m.id === modelId
+                                            ? 'bg-violet-500 text-white'
+                                            : 'text-gray-500 dark:text-gray-300 hover:text-violet-500'
+                                    }`}
+                                >
+                                    {m.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
                 <div className="flex items-end gap-2">
                     <button
                         onClick={() => fileRef.current?.click()}

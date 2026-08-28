@@ -136,19 +136,19 @@ type GeminiPart = {
 };
 
 // 文生图 / 图生图统一入口：带 source 即为图生图
-// override 用于「高清重生成」等场景临时切换模型/分辨率
+// spec 指定用哪个模型（接口风格、模型名、尺寸）
 export async function generateImage(
     promptEn: string,
-    source?: { bytes: Uint8Array; contentType: string },
-    override?: { model?: string; imageSize?: string | null }
+    source: { bytes: Uint8Array; contentType: string } | undefined,
+    spec: { api: 'gemini' | 'openai'; model: string; size: string | null }
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
-    const model = override?.model ?? config.ai.imageModel;
-    const imageSize = override ? override.imageSize ?? null : config.ai.imageSize;
+    const { model, size } = spec;
 
-    if (config.ai.imageApi === 'openai') {
-        return generateImageOpenAI(model, imageSize, promptEn, source);
+    if (spec.api === 'openai') {
+        return generateImageOpenAI(model, size, promptEn, source);
     }
 
+    const imageSize = size;
     const parts: unknown[] = [{ text: promptEn }];
     if (source) {
         parts.push({

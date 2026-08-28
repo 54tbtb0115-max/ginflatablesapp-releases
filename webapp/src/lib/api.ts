@@ -1,4 +1,12 @@
-import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message, User } from '../../shared/types';
+import type {
+    Conversation,
+    GalleryPage,
+    GenerateRequest,
+    ImageModelOption,
+    KeywordStat,
+    Message,
+    User,
+} from '../../shared/types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, init);
@@ -21,12 +29,16 @@ export const api = {
     changePassword: (oldPassword: string, newPassword: string) =>
         request<{ ok: boolean }>('/api/account/password', json({ oldPassword, newPassword })),
     keywordStats: () => request<{ stats: KeywordStat[]; total: number }>('/api/keywords/stats'),
+    models: () => request<{ models: ImageModelOption[]; defaultModelId: string }>('/api/models'),
     listConversations: () => request<{ conversations: Conversation[] }>('/api/conversations'),
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),
     listMessages: (conversationId: string) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/messages`),
-    chat: (conversationId: string, text: string, sourceImageId?: string) =>
-        request<{ messages: Message[] }>(`/api/conversations/${conversationId}/chat`, json({ text, sourceImageId })),
+    chat: (conversationId: string, text: string, sourceImageId?: string, modelId?: string) =>
+        request<{ messages: Message[] }>(
+            `/api/conversations/${conversationId}/chat`,
+            json({ text, sourceImageId, modelId })
+        ),
     generate: (conversationId: string, body: GenerateRequest) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),
     hdRegenerate: (conversationId: string, imageId: string) =>
