@@ -18,6 +18,9 @@ export default function ChatPage() {
         (location.state as { refImageId?: string } | null)?.refImageId ?? null
     );
     const bottomRef = useRef<HTMLDivElement>(null);
+    // 防止请求返回时用户已切到别的会话，把消息插错地方
+    const activeIdRef = useRef<string | null>(null);
+    activeIdRef.current = activeId;
 
     useEffect(() => {
         api.listConversations()
@@ -41,6 +44,20 @@ export default function ChatPage() {
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages, busy]);
+
+    // 有"生成中"的图片时轮询刷新消息——切页面/换会话/刷新后回来，生成结果照常出现
+    useEffect(() => {
+        const hasPending = messages.some((m) => m.type === 'image' && m.content.status === 'pending');
+        if (!hasPending || !activeId) return;
+        const timer = setInterval(() => {
+            api.listMessages(activeId)
+                .then(({ messages }) => {
+                    if (activeIdRef.current === activeId) setMessages(messages);
+                })
+                .catch(() => {});
+        }, 2500);
+        return () => clearInterval(timer);
+    }, [messages, activeId]);
 
     const ensureConversation = useCallback(async (): Promise<string> => {
         if (activeId) return activeId;
@@ -67,7 +84,7 @@ export default function ChatPage() {
         try {
             const id = await ensureConversation();
             const { messages: newMessages } = await api.chat(id, text, refImageId ?? undefined);
-            setMessages((ms) => [...ms, ...newMessages]);
+            if (activeIdRef.current === id) setMessages((ms) => [...ms, ...newMessages]);
             // AI 判断为明确指令时会直接返回生成的图片，此时参考图已被使用
             if (newMessages.some((m) => m.type === 'image')) setRefImageId(null);
             setConversations((cs) =>
@@ -90,7 +107,7 @@ export default function ChatPage() {
                 note: note || undefined,
                 sourceImageId: refImageId ?? undefined,
             });
-            setMessages((ms) => [...ms, ...newMessages]);
+            if (activeIdRef.current === activeId) setMessages((ms) => [...ms, ...newMessages]);
             setRefImageId(null);
         } catch (e) {
             setError((e as Error).message);
@@ -240,8 +257,8 @@ function ChatWindow({
                 {messages.map((m) => (
                     <MessageBubble key={m.id} message={m} busy={busy} onGenerate={onGenerate} onUseAsRef={onUseAsRef} />
                 ))}
-                {busy === 'thinking' && <PendingBubble text="思考中…（明确的指令会直接出图，可能需要十几秒）" />}
-                {busy === 'generating' && <PendingBubble text="正在生成图片，通常需要几秒…" />}
+                {busy === 'thinking' && <PendingBubble text="思考中…" />}
+                {busy === 'generating' && <PendingBubble text="正在整理提示词…" />}
                 {error && (
                     <div className="my-3 mx-auto max-w-md rounded-md bg-red-500/10 text-red-500 text-sm px-4 py-2 text-center">
                         {error}
@@ -361,6 +378,26 @@ function MessageBubble({
     }
 
     if (message.type === 'image') {
+        if (message.content.status === 'pending') {
+            return (
+                <div className="flex justify-start my-3">
+                    <div className="w-[280px] h-[180px] rounded-lg bg-slate-50 dark:bg-zinc-700 flex flex-col items-center justify-center gap-2 text-sm text-gray-400">
+                        <i className="ri-loader-4-line animate-spin text-2xl text-violet-500" aria-hidden />
+                        正在生成图片…（切换页面也不会中断）
+                    </div>
+                </div>
+            );
+        }
+        if (message.content.status === 'failed') {
+            return (
+                <div className="flex justify-start my-3">
+                    <div className="max-w-[320px] rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-500">
+                        <p className="font-medium mb-1">生成失败</p>
+                        <p className="text-xs leading-5">{message.content.error ?? '未知错误'}</p>
+                    </div>
+                </div>
+            );
+        }
         return (
             <div className={`flex ${mine ? 'justify-end' : 'justify-start'} my-3`}>
                 <div className="max-w-[320px]">

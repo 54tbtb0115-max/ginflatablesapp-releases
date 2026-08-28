@@ -168,54 +168,84 @@ async function loadSourceImage(imageId: string): Promise<{ bytes: Uint8Array; co
     return bytes ? { bytes, contentType: row.content_type } : null;
 }
 
-// 调生图模型 → 图片写存储 → 元数据入库 → 生成一条图片消息
-async function generateAndStore(opts: {
+function updateMessageContent(messageId: string, content: unknown): void {
+    db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(JSON.stringify(content), messageId);
+}
+
+// 后台生成：先插入一条"生成中"的图片消息并立刻返回，生成在后台继续，
+// 完成/失败后更新这条消息——用户切换页面、换会话、刷新都不影响生成
+function startGeneration(opts: {
     userId: string;
     conversationId: string;
     promptCn: string;
     promptEn: string;
-    keywordsJson?: string;
+    selected?: Record<string, string[]>;
     sourceImageId?: string;
-}): Promise<Message> {
-    let source: { bytes: Uint8Array; contentType: string } | undefined;
-    if (opts.sourceImageId) {
-        source = (await loadSourceImage(opts.sourceImageId)) ?? undefined;
-        if (!source) throw new Error('参考图不存在或文件丢失');
-    }
-
-    const { bytes, contentType } = await generateImage(opts.promptEn, source);
-
+}): Message {
     const imageId = randomUUID();
-    const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
-    const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
-    await storage.put(r2Key, bytes, contentType);
-
-    const imageMessage = insertMessage(opts.conversationId, 'assistant', 'image', {
+    const base = {
         imageId,
         prompt: opts.promptCn,
         promptEn: opts.promptEn,
         sourceImageId: opts.sourceImageId,
-    });
+    };
+    const message = insertMessage(opts.conversationId, 'assistant', 'image', { ...base, status: 'pending' });
 
-    db.prepare(
-        `INSERT INTO images (id, user_id, conversation_id, message_id, kind, r2_key, content_type, prompt, prompt_en, keywords, source_image_id, model, created_at)
-         VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-        imageId,
-        opts.userId,
-        opts.conversationId,
-        imageMessage.id,
-        r2Key,
-        contentType,
-        opts.promptCn,
-        opts.promptEn,
-        opts.keywordsJson ?? null,
-        opts.sourceImageId ?? null,
-        config.ai.imageModel,
-        now()
-    );
+    void (async () => {
+        try {
+            let source: { bytes: Uint8Array; contentType: string } | undefined;
+            if (opts.sourceImageId) {
+                source = (await loadSourceImage(opts.sourceImageId)) ?? undefined;
+                if (!source) throw new Error('参考图不存在或文件丢失');
+            }
 
-    return imageMessage;
+            const { bytes, contentType } = await generateImage(opts.promptEn, source);
+            const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
+            const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
+            await storage.put(r2Key, bytes, contentType);
+
+            db.prepare(
+                `INSERT INTO images (id, user_id, conversation_id, message_id, kind, r2_key, content_type, prompt, prompt_en, keywords, source_image_id, model, created_at)
+                 VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+                imageId,
+                opts.userId,
+                opts.conversationId,
+                message.id,
+                r2Key,
+                contentType,
+                opts.promptCn,
+                opts.promptEn,
+                opts.selected ? JSON.stringify(opts.selected) : null,
+                opts.sourceImageId ?? null,
+                config.ai.imageModel,
+                now()
+            );
+
+            // 生成成功才计入关键词统计
+            if (opts.selected) {
+                const insertUsage = db.prepare(
+                    'INSERT INTO keyword_usages (id, user_id, conversation_id, image_id, group_name, word, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+                );
+                for (const [group, words] of Object.entries(opts.selected)) {
+                    for (const word of words) {
+                        insertUsage.run(randomUUID(), opts.userId, opts.conversationId, imageId, group, word, now());
+                    }
+                }
+            }
+
+            updateMessageContent(message.id, base);
+        } catch (err) {
+            console.error('生成失败:', err);
+            updateMessageContent(message.id, {
+                ...base,
+                status: 'failed',
+                error: err instanceof Error ? err.message : '生成失败',
+            });
+        }
+    })();
+
+    return message;
 }
 
 // 本会话最近的一张图（生成的或上传的），用于"改上一张图"类指令
@@ -250,7 +280,7 @@ app.post('/api/conversations/:id/chat', async (c) => {
     if (plan.mode === 'direct') {
         const source = sourceImageId ?? (plan.useLastImage ? lastImageId(conversationId) : undefined);
         const replyMessage = insertMessage(conversationId, 'assistant', 'text', { text: plan.reply });
-        const imageMessage = await generateAndStore({
+        const imageMessage = startGeneration({
             userId,
             conversationId,
             promptCn: text.trim(),
@@ -287,25 +317,14 @@ app.post('/api/conversations/:id/generate', async (c) => {
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: requestText });
 
     const promptEn = await refinePrompt(selectedSummary, body.note);
-    const imageMessage = await generateAndStore({
+    const imageMessage = startGeneration({
         userId,
         conversationId,
         promptCn: selectedSummary,
         promptEn,
-        keywordsJson: JSON.stringify(body.selected),
+        selected: body.selected,
         sourceImageId: body.sourceImageId,
     });
-
-    // 记录每个选中的关键词，用于统计使用频率
-    const imageId = imageMessage.type === 'image' ? imageMessage.content.imageId : null;
-    const insertUsage = db.prepare(
-        'INSERT INTO keyword_usages (id, user_id, conversation_id, image_id, group_name, word, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    for (const [group, words] of Object.entries(body.selected)) {
-        for (const word of words) {
-            insertUsage.run(randomUUID(), userId, conversationId, imageId, group, word, now());
-        }
-    }
 
     return c.json({ messages: [userMessage, imageMessage] });
 });

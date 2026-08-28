@@ -17,6 +17,9 @@ export type ImageContent = {
     prompt: string;
     promptEn?: string;
     sourceImageId?: string;
+    // pending = 后台生成中；failed = 生成失败；不存在 = 已完成
+    status?: 'pending' | 'failed';
+    error?: string;
 };
 
 export type Message = {
