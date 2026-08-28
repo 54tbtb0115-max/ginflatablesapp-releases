@@ -14,6 +14,8 @@ export const config = {
         apiKey: required('AI_API_KEY'),
         textModel: process.env.TEXT_MODEL ?? 'google/gemini-2.5-flash',
         imageModel: process.env.IMAGE_MODEL ?? 'gemini-2.5-flash-image',
+        // 输出分辨率（1K/2K/4K），仅 gemini-3-pro-image 系列支持；留空则用模型默认
+        imageSize: process.env.IMAGE_SIZE || null,
     },
     r2:
         process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET

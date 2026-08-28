@@ -139,12 +139,15 @@ export async function generateImage(
         });
     }
 
+    const generationConfig: Record<string, unknown> = { responseModalities: ['TEXT', 'IMAGE'] };
+    if (config.ai.imageSize) generationConfig.imageConfig = { imageSize: config.ai.imageSize };
+
     const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${config.ai.imageModel}:generateContent`, {
         method: 'POST',
         headers: apiHeaders(),
         body: JSON.stringify({
             contents: [{ role: 'user', parts }],
-            generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+            generationConfig,
         }),
     });
     if (!res.ok) throw new Error(`生图请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
