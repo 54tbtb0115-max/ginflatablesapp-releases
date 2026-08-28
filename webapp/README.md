@@ -37,7 +37,17 @@ webapp/
 └── wrangler.jsonc   # Workers / D1 / R2 / AI 绑定配置
 ```
 
-## 本地开发
+## 快速开始（一键脚本）
+
+```bash
+cd webapp
+./setup.sh           # 本地开发：装依赖 + 配密钥 + 建本地库，然后 npm run dev
+./setup.sh deploy    # 部署上线：额外自动建 D1/R2、建表、传密钥、部署到 Cloudflare
+```
+
+脚本会提示粘贴一次 Aiberm 令牌（sk-...），并在部署时自动把 D1 的 database_id 回填进 wrangler.jsonc。
+
+## 本地开发（手动步骤）
 
 ```bash
 cd webapp
