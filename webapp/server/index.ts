@@ -1,9 +1,17 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync } from 'node:fs';
+import { setServers } from 'node:dns';
 import { app } from './app';
 import { config } from './env';
 import { storage } from './storage';
+
+// 指定 DNS 服务器（DNS_SERVERS，逗号分隔）。用于宿主机 DNS 无法解析公网域名的场景，
+// 例如 Tailscale MagicDNS 接管了系统 DNS 但解析不了外部 API 域名。
+if (config.dnsServers.length > 0) {
+    setServers(config.dnsServers);
+    console.log(`使用自定义 DNS：${config.dnsServers.join(', ')}`);
+}
 
 // 生产模式：同时托管打包后的前端（先 npm run build 生成 dist/）
 if (existsSync('dist/index.html')) {

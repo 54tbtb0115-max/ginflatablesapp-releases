@@ -9,6 +9,11 @@ function required(name: string): string {
 export const config = {
     port: Number(process.env.PORT ?? 8787),
     dbPath: process.env.DB_PATH ?? 'data/app.db',
+    // 自定义 DNS 服务器（逗号分隔），留空则用系统默认
+    dnsServers: (process.env.DNS_SERVERS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
     ai: {
         baseUrl: (process.env.AI_BASE_URL ?? 'https://aiberm.com').replace(/\/$/, ''),
         apiKey: required('AI_API_KEY'),
