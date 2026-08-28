@@ -1,84 +1,51 @@
 #!/usr/bin/env bash
-# 一键配置 / 部署脚本
-#   本地开发：  ./setup.sh          （装依赖、配密钥、建本地库，然后 npm run dev 即可）
-#   部署上线：  ./setup.sh deploy   （在上面基础上：建 D1/R2、建表、传密钥、部署到 Cloudflare）
+# 内网部署一键脚本：装依赖 → 交互式生成 .env → 构建前端
+# 之后用 npm start 启动服务（默认 8787 端口），内网用户访问 http://<服务器IP>:8787
 set -euo pipefail
 cd "$(dirname "$0")"
 
 step() { printf '\n\033[1;35m==> %s\033[0m\n' "$1"; }
 
-command -v node >/dev/null || { echo "请先安装 Node.js（https://nodejs.org）"; exit 1; }
+command -v node >/dev/null || { echo "请先安装 Node.js 20+（https://nodejs.org）"; exit 1; }
 
 step "安装依赖"
 npm install
 
-step "配置 AI 密钥（.dev.vars，仅存本机，不会提交 git）"
-if [ -f .dev.vars ] && grep -q '^AI_API_KEY=sk-' .dev.vars; then
-    echo "已存在 .dev.vars，跳过（如需更换密钥请直接编辑该文件）"
+step "生成 .env 配置（仅存本机，不会提交 git）"
+if [ -f .env ]; then
+    echo "已存在 .env，跳过（如需修改请直接编辑该文件）"
 else
-    if [ -n "${AI_API_KEY:-}" ]; then
-        KEY="$AI_API_KEY"
-    else
-        read -r -p "请粘贴 Aiberm 令牌（sk- 开头）: " KEY
+    read -r -p "Aiberm 令牌（sk- 开头）: " AI_KEY
+    case "$AI_KEY" in sk-*) : ;; *) echo "看起来不是 sk- 开头的令牌，退出"; exit 1 ;; esac
+    echo "接下来是 Cloudflare R2 的 S3 凭据（在 R2 控制台创建 API 令牌时显示）；直接回车跳过则图片存本地磁盘"
+    read -r -p "R2 端点（https://<account_id>.r2.cloudflarestorage.com）: " R2_EP
+    R2_AK="" R2_SK="" R2_BUCKET=""
+    if [ -n "$R2_EP" ]; then
+        read -r -p "Access Key ID: " R2_AK
+        read -r -p "Secret Access Key: " R2_SK
+        read -r -p "桶名 [genphotos]: " R2_BUCKET
+        R2_BUCKET=${R2_BUCKET:-genphotos}
     fi
-    case "$KEY" in
-        sk-*) printf 'AI_API_KEY=%s\n' "$KEY" > .dev.vars; echo "已写入 .dev.vars" ;;
-        *) echo "看起来不是 sk- 开头的令牌，退出"; exit 1 ;;
-    esac
+    {
+        echo "PORT=8787"
+        echo "DB_PATH=data/app.db"
+        echo "AI_BASE_URL=https://aiberm.com"
+        echo "AI_API_KEY=$AI_KEY"
+        echo "TEXT_MODEL=google/gemini-2.5-flash"
+        echo "IMAGE_MODEL=gemini-2.5-flash-image"
+        if [ -n "$R2_EP" ]; then
+            echo "R2_ENDPOINT=$R2_EP"
+            echo "R2_ACCESS_KEY_ID=$R2_AK"
+            echo "R2_SECRET_ACCESS_KEY=$R2_SK"
+            echo "R2_BUCKET=$R2_BUCKET"
+        fi
+    } > .env
+    echo "已写入 .env"
 fi
 
-step "初始化本地数据库"
-npm run db:migrate:local
+step "构建前端"
+npm run build
 
-if [ "${1:-}" != "deploy" ]; then
-    step "本地配置完成"
-    echo "运行 npm run dev 后打开 http://localhost:5173"
-    echo "要部署上线时运行：./setup.sh deploy"
-    exit 0
-fi
-
-# ---------- 以下为部署到 Cloudflare ----------
-
-step "检查 Cloudflare 登录状态"
-if ! npx wrangler whoami >/dev/null 2>&1; then
-    echo "尚未登录，即将打开浏览器授权 Cloudflare 账号…"
-    npx wrangler login
-fi
-
-step "创建 D1 数据库（已存在则复用）"
-if grep -q 'REPLACE_WITH_YOUR_D1_DATABASE_ID' wrangler.jsonc; then
-    UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-    DB_ID=$(npx wrangler d1 create ai-image-studio 2>&1 | grep -oE "$UUID_RE" | head -1 || true)
-    if [ -z "$DB_ID" ]; then
-        DB_ID=$(npx wrangler d1 list --json 2>/dev/null | node -e '
-            let s = "";
-            process.stdin.on("data", (d) => (s += d)).on("end", () => {
-                const db = JSON.parse(s).find((d) => d.name === "ai-image-studio");
-                if (db) process.stdout.write(db.uuid);
-            });
-        ')
-    fi
-    [ -n "$DB_ID" ] || { echo "无法获取 D1 database_id，请手动执行 npx wrangler d1 create ai-image-studio"; exit 1; }
-    node -e '
-        const fs = require("fs");
-        const f = "wrangler.jsonc";
-        fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace("REPLACE_WITH_YOUR_D1_DATABASE_ID", process.argv[1]));
-    ' "$DB_ID"
-    echo "database_id 已写入 wrangler.jsonc：$DB_ID"
-else
-    echo "wrangler.jsonc 已配置 database_id，跳过"
-fi
-
-step "创建 R2 存储桶（已存在则复用）"
-npx wrangler r2 bucket create ai-image-studio-images 2>&1 | tail -1 || true
-
-step "初始化线上数据库表"
-npm run db:migrate
-
-step "上传 AI 密钥到 Cloudflare（secret）"
-grep '^AI_API_KEY=' .dev.vars | cut -d= -f2- | npx wrangler secret put AI_API_KEY
-
-step "构建并部署"
-npm run deploy
-
-step "完成！上面输出的 workers.dev 地址就是你的网站"
+step "完成！启动服务："
+echo "  npm start                        # 前台运行"
+echo "  nohup npm start >app.log 2>&1 &  # 简单后台运行（正式建议用 pm2 或 systemd）"

@@ -1,2 +1,0 @@
-# 复制为 .dev.vars 并填入真实令牌（.dev.vars 不会被提交到 git）
-AI_API_KEY=sk-xxxxxxxxxxxxxxxx

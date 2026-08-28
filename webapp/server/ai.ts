@@ -4,18 +4,7 @@
 //   （图生图 = 把参考图作为 inline_data 一起传给图像模型）
 
 import type { KeywordGroup } from '../shared/types';
-
-export type Env = {
-    DB: D1Database;
-    BUCKET: R2Bucket;
-    ASSETS: Fetcher;
-    // 中转平台地址，例如 https://aiberm.com
-    AI_BASE_URL: string;
-    // 令牌（sk-...）：wrangler secret put AI_API_KEY；本地开发写在 .dev.vars
-    AI_API_KEY: string;
-    TEXT_MODEL: string;
-    IMAGE_MODEL: string;
-};
+import { config } from './env';
 
 export type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
@@ -32,13 +21,11 @@ const KEYWORD_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户会用中文
 
 const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Keep it under 120 words.`;
 
-function apiHeaders(env: Env): Record<string, string> {
-    return {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.AI_API_KEY}`,
-        'x-goog-api-key': env.AI_API_KEY,
-    };
-}
+const apiHeaders = (): Record<string, string> => ({
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${config.ai.apiKey}`,
+    'x-goog-api-key': config.ai.apiKey,
+});
 
 function extractJson(text: string): unknown {
     const start = text.indexOf('{');
@@ -47,12 +34,12 @@ function extractJson(text: string): unknown {
     return JSON.parse(text.slice(start, end + 1));
 }
 
-async function runTextModel(env: Env, system: string, history: HistoryEntry[], user: string): Promise<string> {
-    const res = await fetch(`${env.AI_BASE_URL}/v1/chat/completions`, {
+async function runTextModel(system: string, history: HistoryEntry[], user: string): Promise<string> {
+    const res = await fetch(`${config.ai.baseUrl}/v1/chat/completions`, {
         method: 'POST',
-        headers: apiHeaders(env),
+        headers: apiHeaders(),
         body: JSON.stringify({
-            model: env.TEXT_MODEL,
+            model: config.ai.textModel,
             messages: [
                 { role: 'system', content: system },
                 ...history,
@@ -69,11 +56,10 @@ async function runTextModel(env: Env, system: string, history: HistoryEntry[], u
 }
 
 export async function summarizeKeywords(
-    env: Env,
     history: HistoryEntry[],
     userText: string
 ): Promise<{ reply: string; groups: KeywordGroup[] }> {
-    const raw = await runTextModel(env, KEYWORD_SYSTEM_PROMPT, history, userText);
+    const raw = await runTextModel(KEYWORD_SYSTEM_PROMPT, history, userText);
     const parsed = extractJson(raw) as { reply?: string; groups?: { name?: string; options?: unknown[] }[] };
     const groups: KeywordGroup[] = (parsed.groups ?? [])
         .map((g) => ({
@@ -85,26 +71,10 @@ export async function summarizeKeywords(
     return { reply: String(parsed.reply ?? '这是我总结的关键词，请挑选后生成。'), groups };
 }
 
-export async function refinePrompt(env: Env, keywordSummary: string, note: string | undefined): Promise<string> {
+export async function refinePrompt(keywordSummary: string, note: string | undefined): Promise<string> {
     const user = `Keywords: ${keywordSummary}${note ? `\nExtra notes: ${note}` : ''}`;
-    const text = await runTextModel(env, PROMPT_REFINE_SYSTEM, [], user);
+    const text = await runTextModel(PROMPT_REFINE_SYSTEM, [], user);
     return text.replace(/^["'\s]+|["'\s]+$/g, '');
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-    let bin = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-        bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    return btoa(bin);
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
 }
 
 type GeminiPart = {
@@ -115,18 +85,19 @@ type GeminiPart = {
 
 // 文生图 / 图生图统一入口：带 source 即为图生图（Gemini 的图像编辑模式）
 export async function generateImage(
-    env: Env,
     promptEn: string,
     source?: { bytes: Uint8Array; contentType: string }
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
     const parts: unknown[] = [{ text: promptEn }];
     if (source) {
-        parts.push({ inline_data: { mime_type: source.contentType, data: bytesToBase64(source.bytes) } });
+        parts.push({
+            inline_data: { mime_type: source.contentType, data: Buffer.from(source.bytes).toString('base64') },
+        });
     }
 
-    const res = await fetch(`${env.AI_BASE_URL}/v1beta/models/${env.IMAGE_MODEL}:generateContent`, {
+    const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${config.ai.imageModel}:generateContent`, {
         method: 'POST',
-        headers: apiHeaders(env),
+        headers: apiHeaders(),
         body: JSON.stringify({
             contents: [{ role: 'user', parts }],
             generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
@@ -143,10 +114,9 @@ export async function generateImage(
     }
     for (const part of data.candidates?.[0]?.content?.parts ?? []) {
         const inline = part.inlineData ?? part.inline_data;
-        const b64 = inline?.data;
-        if (b64) {
+        if (inline?.data) {
             const contentType = part.inlineData?.mimeType ?? part.inline_data?.mime_type ?? 'image/png';
-            return { bytes: base64ToBytes(b64), contentType };
+            return { bytes: new Uint8Array(Buffer.from(inline.data, 'base64')), contentType };
         }
     }
     const text = data.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
