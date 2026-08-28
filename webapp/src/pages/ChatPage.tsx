@@ -18,9 +18,30 @@ export default function ChatPage() {
     const [refImageId, setRefImageId] = useState<string | null>(
         (location.state as { refImageId?: string } | null)?.refImageId ?? null
     );
-    // 生图模型选择（发送时生效）
+    // 生图模型选择：每个会话独立记忆（存本地）；未建会话时用 __new__ 这个键
     const [models, setModels] = useState<ImageModelOption[]>([]);
-    const [modelId, setModelId] = useState<string>('');
+    const [defaultModelId, setDefaultModelId] = useState('');
+    const [modelMap, setModelMap] = useState<Record<string, string>>(() => {
+        try {
+            return JSON.parse(localStorage.getItem('modelMap') ?? '{}');
+        } catch {
+            return {};
+        }
+    });
+    const NEW_KEY = '__new__';
+    const convKey = activeId ?? NEW_KEY;
+    const modelId = modelMap[convKey] ?? defaultModelId;
+    const chooseModel = (id: string) => {
+        setModelMap((m) => {
+            const next = { ...m, [convKey]: id };
+            try {
+                localStorage.setItem('modelMap', JSON.stringify(next));
+            } catch {
+                /* 忽略本地存储失败 */
+            }
+            return next;
+        });
+    };
     const bottomRef = useRef<HTMLDivElement>(null);
     // 防止请求返回时用户已切到别的会话，把消息插错地方
     const activeIdRef = useRef<string | null>(null);
@@ -30,7 +51,7 @@ export default function ChatPage() {
         api.models()
             .then(({ models, defaultModelId }) => {
                 setModels(models);
-                setModelId((cur) => cur || defaultModelId || models[0]?.id || '');
+                setDefaultModelId(defaultModelId || models[0]?.id || '');
             })
             .catch(() => {});
     }, []);
@@ -76,6 +97,17 @@ export default function ChatPage() {
         if (activeId) return activeId;
         const { conversation } = await api.createConversation();
         setConversations((cs) => [conversation, ...cs]);
+        // 把「新会话」的模型选择带到刚创建的会话上
+        setModelMap((m) => {
+            if (!m[NEW_KEY]) return m;
+            const next = { ...m, [conversation.id]: m[NEW_KEY] };
+            try {
+                localStorage.setItem('modelMap', JSON.stringify(next));
+            } catch {
+                /* 忽略 */
+            }
+            return next;
+        });
         setActiveId(conversation.id);
         return conversation.id;
     }, [activeId]);
@@ -169,7 +201,7 @@ export default function ChatPage() {
                 refImageId={refImageId}
                 models={models}
                 modelId={modelId}
-                onModelChange={setModelId}
+                onModelChange={chooseModel}
                 onClearRef={() => setRefImageId(null)}
                 onUseAsRef={setRefImageId}
                 onSend={sendText}
