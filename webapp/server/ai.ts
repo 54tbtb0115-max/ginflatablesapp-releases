@@ -12,7 +12,7 @@ const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消
 
 情况 A（direct，直接生成）——优先选这种：用户的指令已经足够明确，不需要再挑选关键词。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整描述、或用户明显希望直接出图。
 输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "完整的英文绘画提示词", "useLastImage": true 或 false}
-- prompt：结合对话上下文写出完整、具体的英文提示词；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger, filling most of the frame..."）
+- prompt：结合对话上下文写出完整、具体的英文提示词；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger, filling most of the frame..."）；prompt 末尾固定加上清晰度关键词：sharp focus, highly detailed, crisp clean edges
 - useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
 情况 B（keywords，需要细化）：用户在描述一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时才用。
@@ -31,7 +31,7 @@ const KEYWORD_ONLY_PROMPT = `你是一个 AI 绘画助手。用户会用中文�
 - 每组 2-5 个选项，选项是简短的中文词组
 - 用户描述里明确提到的内容放在对应组的最前面`;
 
-const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Keep it under 120 words.`;
+const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Always end the prompt with quality keywords: sharp focus, highly detailed, crisp clean edges, professional quality. Keep it under 130 words.`;
 
 const apiHeaders = (): Record<string, string> => ({
     'Content-Type': 'application/json',
@@ -128,10 +128,15 @@ type GeminiPart = {
 };
 
 // 文生图 / 图生图统一入口：带 source 即为图生图（Gemini 的图像编辑模式）
+// override 用于「高清重生成」等场景临时切换模型/分辨率
 export async function generateImage(
     promptEn: string,
-    source?: { bytes: Uint8Array; contentType: string }
+    source?: { bytes: Uint8Array; contentType: string },
+    override?: { model?: string; imageSize?: string | null }
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const model = override?.model ?? config.ai.imageModel;
+    const imageSize = override ? override.imageSize ?? null : config.ai.imageSize;
+
     const parts: unknown[] = [{ text: promptEn }];
     if (source) {
         parts.push({
@@ -140,9 +145,9 @@ export async function generateImage(
     }
 
     const generationConfig: Record<string, unknown> = { responseModalities: ['TEXT', 'IMAGE'] };
-    if (config.ai.imageSize) generationConfig.imageConfig = { imageSize: config.ai.imageSize };
+    if (imageSize) generationConfig.imageConfig = { imageSize };
 
-    const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${config.ai.imageModel}:generateContent`, {
+    const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: apiHeaders(),
         body: JSON.stringify({

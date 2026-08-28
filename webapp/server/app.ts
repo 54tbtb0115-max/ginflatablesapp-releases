@@ -181,7 +181,10 @@ function startGeneration(opts: {
     promptEn: string;
     selected?: Record<string, string[]>;
     sourceImageId?: string;
+    // 高清模式：用 HD 模型与更高分辨率重制
+    hd?: boolean;
 }): Message {
+    const model = opts.hd ? config.ai.hdImageModel : config.ai.imageModel;
     const imageId = randomUUID();
     const base = {
         imageId,
@@ -199,7 +202,11 @@ function startGeneration(opts: {
                 if (!source) throw new Error('参考图不存在或文件丢失');
             }
 
-            const { bytes, contentType } = await generateImage(opts.promptEn, source);
+            const { bytes, contentType } = await generateImage(
+                opts.promptEn,
+                source,
+                opts.hd ? { model, imageSize: config.ai.hdImageSize } : undefined
+            );
             const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
             const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
             await storage.put(r2Key, bytes, contentType);
@@ -218,7 +225,7 @@ function startGeneration(opts: {
                 opts.promptEn,
                 opts.selected ? JSON.stringify(opts.selected) : null,
                 opts.sourceImageId ?? null,
-                config.ai.imageModel,
+                model,
                 now()
             );
 
@@ -346,6 +353,32 @@ app.get('/api/keywords/stats', (c) => {
         lastUsed: r.last_used,
     }));
     return c.json({ stats, total });
+});
+
+// ---------- 高清重生成：以某张图为参考，用 HD 模型按原提示词重制 ----------
+app.post('/api/conversations/:id/hd', async (c) => {
+    const conversationId = c.req.param('id');
+    const userId = c.get('userId');
+    ownedConversation(userId, conversationId);
+    const { imageId } = await c.req.json<{ imageId: string }>();
+
+    const row = db.prepare('SELECT id, prompt, prompt_en FROM images WHERE id = ?').get(imageId) as
+        | { id: string; prompt: string | null; prompt_en: string | null }
+        | undefined;
+    if (!row) return c.json({ error: '图片不存在' }, 404);
+
+    const promptEn = `Recreate this exact image faithfully with much finer detail, sharp focus, crisp clean edges and higher fidelity. Keep the composition, subjects and colors unchanged. ${
+        row.prompt_en ?? ''
+    }`.trim();
+    const message = startGeneration({
+        userId,
+        conversationId,
+        promptCn: `高清重制：${row.prompt ?? ''}`,
+        promptEn,
+        sourceImageId: row.id,
+        hd: true,
+    });
+    return c.json({ messages: [message] });
 });
 
 // ---------- 上传参考图（图生图入口之一） ----------

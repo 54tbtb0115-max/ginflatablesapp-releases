@@ -29,6 +29,8 @@ export const api = {
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/chat`, json({ text, sourceImageId })),
     generate: (conversationId: string, body: GenerateRequest) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),
+    hdRegenerate: (conversationId: string, imageId: string) =>
+        request<{ messages: Message[] }>(`/api/conversations/${conversationId}/hd`, json({ imageId })),
     upload: (conversationId: string, file: File) =>
         request<{ imageId: string; message: Message }>(`/api/conversations/${conversationId}/upload`, {
             method: 'POST',

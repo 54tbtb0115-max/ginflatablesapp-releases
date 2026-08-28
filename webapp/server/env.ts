@@ -16,6 +16,9 @@ export const config = {
         imageModel: process.env.IMAGE_MODEL ?? 'gemini-2.5-flash-image',
         // 输出分辨率（1K/2K/4K），仅 gemini-3-pro-image 系列支持；留空则用模型默认
         imageSize: process.env.IMAGE_SIZE || null,
+        // 「高清重生成」用的模型与分辨率（按次计费更贵，仅在用户点高清按钮时使用）
+        hdImageModel: process.env.HD_IMAGE_MODEL ?? 'gemini-3-pro-image-preview',
+        hdImageSize: process.env.HD_IMAGE_SIZE || '2K',
     },
     r2:
         process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET

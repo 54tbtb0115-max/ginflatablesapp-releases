@@ -117,6 +117,18 @@ export default function ChatPage() {
         }
     };
 
+    // 高清重生成：用更强的模型 + 更高分辨率按原提示词重制这张图（单独计费，仅点击时使用）
+    const hdRegen = async (imageId: string) => {
+        if (!activeId) return;
+        setError(null);
+        try {
+            const { messages: newMessages } = await api.hdRegenerate(activeId, imageId);
+            if (activeIdRef.current === activeId) setMessages((ms) => [...ms, ...newMessages]);
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    };
+
     const uploadReference = async (file: File) => {
         setError(null);
         try {
@@ -147,6 +159,7 @@ export default function ChatPage() {
                 onSend={sendText}
                 onGenerate={generate}
                 onUpload={uploadReference}
+                onHd={hdRegen}
                 bottomRef={bottomRef}
             />
         </div>
@@ -211,6 +224,7 @@ function ChatWindow({
     onSend,
     onGenerate,
     onUpload,
+    onHd,
     bottomRef,
 }: {
     messages: Message[];
@@ -222,6 +236,7 @@ function ChatWindow({
     onSend: (text: string) => void;
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUpload: (file: File) => void;
+    onHd: (imageId: string) => void;
     bottomRef: React.RefObject<HTMLDivElement>;
 }) {
     const [input, setInput] = useState('');
@@ -256,7 +271,14 @@ function ChatWindow({
             <div className="flex-1 overflow-y-auto scrollbar-thin px-4 lg:px-6 py-4 pb-[90px] lg:pb-4">
                 {messages.length === 0 && busy === 'idle' && <EmptyState />}
                 {messages.map((m) => (
-                    <MessageBubble key={m.id} message={m} busy={busy} onGenerate={onGenerate} onUseAsRef={onUseAsRef} />
+                    <MessageBubble
+                        key={m.id}
+                        message={m}
+                        busy={busy}
+                        onGenerate={onGenerate}
+                        onUseAsRef={onUseAsRef}
+                        onHd={onHd}
+                    />
                 ))}
                 {busy === 'thinking' && <PendingBubble text="思考中…" />}
                 {busy === 'generating' && <PendingBubble text="正在整理提示词…" />}
@@ -362,11 +384,13 @@ function MessageBubble({
     busy,
     onGenerate,
     onUseAsRef,
+    onHd,
 }: {
     message: Message;
     busy: Busy;
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUseAsRef: (id: string) => void;
+    onHd: (imageId: string) => void;
 }) {
     const mine = message.role === 'user';
 
@@ -426,6 +450,13 @@ function MessageBubble({
                             title="以此图再创作（图生图）"
                         >
                             <i className="ri-repeat-2-line" aria-hidden />
+                        </button>
+                        <button
+                            onClick={() => onHd(message.content.imageId)}
+                            className="hover:text-violet-500"
+                            title="高清重生成（用更强模型重制 2K 版，单独计费）"
+                        >
+                            <i className="ri-hd-line" aria-hidden />
                         </button>
                     </div>
                 </div>
