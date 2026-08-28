@@ -1,0 +1,38 @@
+// Cloudflare Workers 配置
+// 首次部署前：
+//   1. wrangler d1 create ai-image-studio        → 把返回的 database_id 填到下面
+//   2. wrangler r2 bucket create ai-image-studio-images
+//   3. npm run db:migrate
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "ai-image-studio",
+    "main": "worker/index.ts",
+    "compatibility_date": "2025-04-01",
+    "assets": {
+        "not_found_handling": "single-page-application"
+    },
+    "ai": {
+        "binding": "AI"
+    },
+    "d1_databases": [
+        {
+            "binding": "DB",
+            "database_name": "ai-image-studio",
+            "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+        }
+    ],
+    "r2_buckets": [
+        {
+            "binding": "BUCKET",
+            "bucket_name": "ai-image-studio-images"
+        }
+    ],
+    "vars": {
+        // 关键词/提示词 LLM（Workers AI 模型，可替换）
+        "TEXT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        // 文生图模型
+        "T2I_MODEL": "@cf/black-forest-labs/flux-1-schnell",
+        // 图生图模型
+        "I2I_MODEL": "@cf/runwayml/stable-diffusion-v1-5-img2img"
+    }
+}
