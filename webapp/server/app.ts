@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { Hono } from 'hono';
-import { getCookie, setCookie } from 'hono/cookie';
-import type { Conversation, GalleryPage, GenerateRequest, Message } from '../shared/types';
+import { Hono, type Context } from 'hono';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
 import { generateImage, planTurn, refinePrompt, type HistoryEntry } from './ai';
+import { SESSION_DAYS, createSession, deleteSession, loginUser, sessionUser } from './auth';
 import { config } from './env';
 import { db } from './db';
 import { storage } from './storage';
@@ -13,26 +14,52 @@ export const app = new Hono<{ Variables: Vars }>();
 
 const now = () => Date.now();
 
-// ---------- 用户识别：首次访问发一个长期 cookie，自动建用户 ----------
+// ---------- 鉴权：除注册/登录接口外，一律需要登录 ----------
 app.use('/api/*', async (c, next) => {
-    let uid = getCookie(c, 'uid');
-    if (!uid) {
-        uid = randomUUID();
-        setCookie(c, 'uid', uid, {
-            path: '/',
-            httpOnly: true,
-            sameSite: 'Lax',
-            maxAge: 60 * 60 * 24 * 365,
-        });
-    }
-    db.prepare('INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)').run(uid, now());
-    c.set('userId', uid);
+    if (c.req.path.startsWith('/api/auth/')) return next();
+    const token = getCookie(c, 'sid');
+    const user = token ? sessionUser(token) : null;
+    if (!user) return c.json({ error: '未登录' }, 401);
+    c.set('userId', user.id);
     await next();
 });
 
 app.onError((err, c) => {
     console.error(err);
     return c.json({ error: err instanceof Error ? err.message : '服务出错了' }, 500);
+});
+
+// ---------- 账号 ----------
+function issueSession(c: Context, userId: string) {
+    const token = createSession(userId);
+    setCookie(c, 'sid', token, {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'Lax',
+        maxAge: SESSION_DAYS * 24 * 60 * 60,
+    });
+}
+
+// 不开放自助注册：账号由管理员在服务器上创建（npm run user add 用户名 密码）后分发
+app.post('/api/auth/login', async (c) => {
+    const { username, password } = await c.req.json<{ username: string; password: string }>();
+    const user = loginUser(username ?? '', password ?? '');
+    issueSession(c, user.id);
+    return c.json({ user });
+});
+
+app.post('/api/auth/logout', (c) => {
+    const token = getCookie(c, 'sid');
+    if (token) deleteSession(token);
+    deleteCookie(c, 'sid', { path: '/' });
+    return c.json({ ok: true });
+});
+
+app.get('/api/auth/me', (c) => {
+    const token = getCookie(c, 'sid');
+    const user = token ? sessionUser(token) : null;
+    if (!user) return c.json({ error: '未登录' }, 401);
+    return c.json({ user });
 });
 
 // ---------- 会话 ----------
@@ -260,7 +287,37 @@ app.post('/api/conversations/:id/generate', async (c) => {
         sourceImageId: body.sourceImageId,
     });
 
+    // 记录每个选中的关键词，用于统计使用频率
+    const imageId = imageMessage.type === 'image' ? imageMessage.content.imageId : null;
+    const insertUsage = db.prepare(
+        'INSERT INTO keyword_usages (id, user_id, conversation_id, image_id, group_name, word, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    for (const [group, words] of Object.entries(body.selected)) {
+        for (const word of words) {
+            insertUsage.run(randomUUID(), userId, conversationId, imageId, group, word, now());
+        }
+    }
+
     return c.json({ messages: [userMessage, imageMessage] });
+});
+
+// ---------- 关键词统计：所有用户选过的关键词按使用次数排行 ----------
+app.get('/api/keywords/stats', (c) => {
+    const rows = db
+        .prepare(
+            `SELECT group_name, word, COUNT(*) AS count, MAX(created_at) AS last_used
+             FROM keyword_usages GROUP BY group_name, word
+             ORDER BY count DESC, last_used DESC LIMIT 500`
+        )
+        .all() as { group_name: string; word: string; count: number; last_used: number }[];
+    const total = (db.prepare('SELECT COUNT(*) AS n FROM keyword_usages').get() as { n: number }).n;
+    const stats: KeywordStat[] = rows.map((r) => ({
+        group: r.group_name,
+        word: r.word,
+        count: r.count,
+        lastUsed: r.last_used,
+    }));
+    return c.json({ stats, total });
 });
 
 // ---------- 上传参考图（图生图入口之一） ----------

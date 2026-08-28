@@ -2,9 +2,33 @@
 -- 执行：npm run db:migrate:local（本地） / npm run db:migrate（线上）
 
 CREATE TABLE IF NOT EXISTS users (
-    id         TEXT PRIMARY KEY,
-    created_at INTEGER NOT NULL
+    id            TEXT PRIMARY KEY,
+    username      TEXT,
+    password_hash TEXT,
+    created_at    INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL;
+
+-- 登录会话
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- 关键词使用记录：每生成一张图，勾选的每个关键词记一行，用于统计哪些词用得多
+CREATE TABLE IF NOT EXISTS keyword_usages (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id),
+    conversation_id TEXT,
+    image_id        TEXT,
+    group_name      TEXT NOT NULL,
+    word            TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_keyword_usages_word ON keyword_usages(group_name, word);
 
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,

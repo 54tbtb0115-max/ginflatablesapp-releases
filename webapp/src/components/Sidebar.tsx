@@ -1,7 +1,18 @@
 import { NavLink } from 'react-router-dom';
+import type { User } from '../../shared/types';
 
 // 左侧图标导航栏，样式参考 Chatvia：桌面端 75px 竖排，移动端置底横排
-export default function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggleDark: () => void }) {
+export default function Sidebar({
+    dark,
+    onToggleDark,
+    user,
+    onLogout,
+}: {
+    dark: boolean;
+    onToggleDark: () => void;
+    user: User;
+    onLogout: () => void;
+}) {
     const tabClass = ({ isActive }: { isActive: boolean }) =>
         `flex items-center justify-center mx-auto h-14 w-14 my-1 rounded-lg text-2xl transition-colors ` +
         (isActive
@@ -25,15 +36,33 @@ export default function Sidebar({ dark, onToggleDark }: { dark: boolean; onToggl
                         <i className="ri-image-2-line" aria-hidden />
                     </NavLink>
                 </li>
+                <li className="flex-grow lg:flex-grow-0">
+                    <NavLink to="/keywords" className={tabClass} title="关键词统计">
+                        <i className="ri-bar-chart-horizontal-line" aria-hidden />
+                    </NavLink>
+                </li>
             </ul>
 
-            <div className="my-3 lg:my-5">
+            <div className="flex flex-row lg:flex-col items-center my-1 lg:my-4 gap-1">
                 <button
                     onClick={onToggleDark}
-                    className="flex items-center justify-center h-14 w-14 rounded-lg text-2xl text-violet-100 hover:text-white"
+                    className="flex items-center justify-center h-12 w-12 rounded-lg text-2xl text-violet-100 hover:text-white"
                     title={dark ? '切换到亮色' : '切换到暗色'}
                 >
                     <i className={dark ? 'ri-sun-line' : 'ri-moon-clear-line'} aria-hidden />
+                </button>
+                <div
+                    className="flex items-center justify-center h-9 w-9 rounded-full bg-white/25 text-white text-sm font-semibold"
+                    title={`当前账号：${user.username}`}
+                >
+                    {user.username.slice(0, 1).toUpperCase()}
+                </div>
+                <button
+                    onClick={onLogout}
+                    className="flex items-center justify-center h-12 w-12 rounded-lg text-xl text-violet-100 hover:text-white"
+                    title="退出登录"
+                >
+                    <i className="ri-logout-box-r-line" aria-hidden />
                 </button>
             </div>
         </nav>

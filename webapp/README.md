@@ -7,6 +7,8 @@
 3. **连续聊天**：同一会话内的历史消息会作为上下文传给 AI，可以说「把刚才那张改成夜晚的」
 4. **图片全部落盘**：图片实体存 **Cloudflare R2**（S3 兼容接口直连），元数据（prompt、关键词、所属会话）存本地 **SQLite**，每张图都是聊天里的一条消息
 5. **图库**：`/gallery` 汇集所有用户生成的所有图片，瀑布流 + 游标分页，可查看 prompt、下载、再创作
+6. **账号登录**：必须登录才能使用；账号由管理员在服务器上创建分发（不开放注册）；每人只能看到自己的会话，图库全员共享
+7. **关键词统计**：`/keywords` 页汇总所有用户生成时选中的关键词，按分组展示使用次数排行，便于整理高频词
 
 界面样式参考 Themesbrand 的 Chatvia Tailwind 模板（violet 主色、Public Sans 字体、左侧图标栏 + 会话列表 + 聊天区布局，支持暗色模式），用 React 重新实现。
 
@@ -47,6 +49,15 @@ webapp/
 cd webapp
 ./setup.sh    # 装依赖 → 按提示填 Aiberm 令牌和 R2 凭据 → 构建
 npm start     # 启动，默认 8787 端口；内网用户访问 http://<服务器IP>:8787
+```
+
+### 账号管理（在 webapp/ 目录下执行）
+
+```bash
+npm run user add 张三 abc123456    # 创建账号（密码至少 6 位），然后把账号发给使用者
+npm run user list                  # 列出所有账号及生成数量
+npm run user passwd 张三 新密码     # 重置密码
+npm run user disable 张三          # 禁用账号（踢下线，历史图片保留）
 ```
 
 R2 凭据在 Cloudflare 控制台 → R2 → 管理 API 令牌 里创建（权限选"对象读和写"，限定目标桶），会得到端点 URL、Access Key ID、Secret Access Key 三样，对应 `.env` 里的 `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`，桶名填 `R2_BUCKET`。

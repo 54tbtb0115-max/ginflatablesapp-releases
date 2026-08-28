@@ -59,6 +59,15 @@ export type GenerateRequest = {
     sourceImageId?: string;
 };
 
+export type User = { id: string; username: string };
+
+export type KeywordStat = {
+    group: string;
+    word: string;
+    count: number;
+    lastUsed: number;
+};
+
 export function imageUrl(id: string): string {
     return `/api/images/${id}/file`;
 }

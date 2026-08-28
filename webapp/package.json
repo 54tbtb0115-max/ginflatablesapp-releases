@@ -8,6 +8,7 @@
         "dev": "concurrently -k -n server,web \"tsx watch server/index.ts\" \"vite\"",
         "build": "vite build",
         "start": "tsx server/index.ts",
+        "user": "tsx server/manage-users.ts",
         "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit"
     },
     "dependencies": {

@@ -1,4 +1,4 @@
-import type { Conversation, GalleryPage, GenerateRequest, Message } from '../../shared/types';
+import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message, User } from '../../shared/types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetch(url, init);
@@ -14,6 +14,11 @@ const json = (body: unknown): RequestInit => ({
 });
 
 export const api = {
+    me: () => request<{ user: User }>('/api/auth/me'),
+    login: (username: string, password: string) =>
+        request<{ user: User }>('/api/auth/login', json({ username, password })),
+    logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+    keywordStats: () => request<{ stats: KeywordStat[]; total: number }>('/api/keywords/stats'),
     listConversations: () => request<{ conversations: Conversation[] }>('/api/conversations'),
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),
     listMessages: (conversationId: string) =>
