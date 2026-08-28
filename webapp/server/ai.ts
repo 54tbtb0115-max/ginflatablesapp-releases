@@ -127,7 +127,7 @@ type GeminiPart = {
     inline_data?: { mime_type?: string; data?: string };
 };
 
-// 文生图 / 图生图统一入口：带 source 即为图生图（Gemini 的图像编辑模式）
+// 文生图 / 图生图统一入口：带 source 即为图生图
 // override 用于「高清重生成」等场景临时切换模型/分辨率
 export async function generateImage(
     promptEn: string,
@@ -136,6 +136,10 @@ export async function generateImage(
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
     const model = override?.model ?? config.ai.imageModel;
     const imageSize = override ? override.imageSize ?? null : config.ai.imageSize;
+
+    if (config.ai.imageApi === 'openai') {
+        return generateImageOpenAI(model, imageSize, promptEn, source);
+    }
 
     const parts: unknown[] = [{ text: promptEn }];
     if (source) {
@@ -173,4 +177,49 @@ export async function generateImage(
     }
     const text = data.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
     throw new Error(`生图模型没有返回图片${text ? `：${text.slice(0, 200)}` : ''}`);
+}
+
+// OpenAI 图像接口（gpt-image 等）：文生图走 /v1/images/generations，图生图走 /v1/images/edits
+// gpt-image 的写实度明显更好，适合产品实拍类需求
+async function generateImageOpenAI(
+    model: string,
+    imageSize: string | null,
+    promptEn: string,
+    source?: { bytes: Uint8Array; contentType: string }
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+    // OpenAI 尺寸格式为 宽x高（如 1024x1024），非 1K/2K；不是该格式则用 auto
+    const size = imageSize && /^\d+x\d+$/.test(imageSize) ? imageSize : 'auto';
+    const auth = { Authorization: `Bearer ${config.ai.apiKey}` };
+    let res: Response;
+
+    if (source) {
+        // 图生图：multipart/form-data，不要手动设 Content-Type（让 fetch 自动带 boundary）
+        const form = new FormData();
+        form.append('model', model);
+        form.append('prompt', promptEn);
+        form.append('size', size);
+        form.append('n', '1');
+        form.append('image', new Blob([source.bytes], { type: source.contentType }), 'image.png');
+        res = await fetch(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form });
+    } else {
+        res = await fetch(`${config.ai.baseUrl}/v1/images/generations`, {
+            method: 'POST',
+            headers: { ...auth, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, prompt: promptEn, size, n: 1 }),
+        });
+    }
+
+    if (!res.ok) throw new Error(`生图请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
+    const data = (await res.json()) as { data?: { b64_json?: string; url?: string }[] };
+    const item = data.data?.[0];
+    if (item?.b64_json) {
+        return { bytes: new Uint8Array(Buffer.from(item.b64_json, 'base64')), contentType: 'image/png' };
+    }
+    if (item?.url) {
+        const imgRes = await fetch(item.url);
+        if (!imgRes.ok) throw new Error(`下载生成的图片失败（${imgRes.status}）`);
+        const contentType = imgRes.headers.get('content-type') ?? 'image/png';
+        return { bytes: new Uint8Array(await imgRes.arrayBuffer()), contentType };
+    }
+    throw new Error('生图模型没有返回图片');
 }

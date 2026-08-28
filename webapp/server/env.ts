@@ -21,6 +21,8 @@ export const config = {
         apiKey: required('AI_API_KEY'),
         textModel: process.env.TEXT_MODEL ?? 'google/gemini-2.5-flash',
         imageModel: process.env.IMAGE_MODEL ?? 'gemini-2.5-flash-image',
+        // 生图接口风格：'gemini'（原生 generateContent）| 'openai'（/v1/images，更写实的 gpt-image 走这个）
+        imageApi: (process.env.IMAGE_API ?? 'gemini').toLowerCase() as 'gemini' | 'openai',
         // 输出分辨率（1K/2K/4K），仅 gemini-3-pro-image 系列支持；留空则用模型默认
         imageSize: process.env.IMAGE_SIZE || null,
         // 「高清重生成」用的模型与分辨率（按次计费更贵，仅在用户点高清按钮时使用）
