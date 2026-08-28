@@ -18,8 +18,8 @@ export const api = {
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),
     listMessages: (conversationId: string) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/messages`),
-    chat: (conversationId: string, text: string) =>
-        request<{ messages: Message[] }>(`/api/conversations/${conversationId}/chat`, json({ text })),
+    chat: (conversationId: string, text: string, sourceImageId?: string) =>
+        request<{ messages: Message[] }>(`/api/conversations/${conversationId}/chat`, json({ text, sourceImageId })),
     generate: (conversationId: string, body: GenerateRequest) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),
     upload: (conversationId: string, file: File) =>

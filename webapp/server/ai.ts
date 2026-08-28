@@ -8,16 +8,18 @@ import { config } from './env';
 
 export type HistoryEntry = { role: 'user' | 'assistant'; content: string };
 
-const KEYWORD_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户会用中文描述想要生成的画面，你要结合本次对话的上下文，把描述总结成可勾选的关键词，供用户挑选后交给绘画模型。
+const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消息后，你要结合本次对话的上下文判断怎么响应，并且必须只输出一个 JSON 对象（不要任何其他文字、不要 markdown 代码块）。有两种情况：
 
-必须只输出一个 JSON 对象，不要输出任何其他文字、不要用 markdown 代码块。格式：
-{"reply": "一句简短的中文回应，说明你的理解", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
+情况 A（direct，直接生成）——优先选这种：用户的指令已经足够明确，不需要再挑选关键词。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整描述、或用户明显希望直接出图。
+输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "完整的英文绘画提示词", "useLastImage": true 或 false}
+- prompt：结合对话上下文写出完整、具体的英文提示词；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger, filling most of the frame..."）
+- useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
-要求：
-- 分组固定为：场景、主体、风格、光线、构图；某组没有信息时给出 2-3 个合理的推荐选项
-- 每组 2-5 个选项，选项是简短的中文词组
-- 用户描述里明确提到的内容放在对应组的最前面
-- 如果用户是在修改之前的图（例如"改成夜晚"），保留之前的关键词，只更新变化的部分`;
+情况 B（keywords，需要细化）：用户在描述一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时才用。
+输出格式：{"mode": "keywords", "reply": "一句简短的中文回应", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
+- 分组固定为：场景、主体、风格、光线、构图；每组 2-5 个简短中文词组选项；用户明确提到的内容放在对应组最前面
+
+判断原则：能直接做就直接做（direct），不要动不动让用户选关键词；只有全新且模糊的场景描述才用 keywords。`;
 
 const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Keep it under 120 words.`;
 
@@ -55,12 +57,31 @@ async function runTextModel(system: string, history: HistoryEntry[], user: strin
     return content;
 }
 
-export async function summarizeKeywords(
-    history: HistoryEntry[],
-    userText: string
-): Promise<{ reply: string; groups: KeywordGroup[] }> {
-    const raw = await runTextModel(KEYWORD_SYSTEM_PROMPT, history, userText);
-    const parsed = extractJson(raw) as { reply?: string; groups?: { name?: string; options?: unknown[] }[] };
+export type TurnPlan =
+    | { mode: 'keywords'; reply: string; groups: KeywordGroup[] }
+    | { mode: 'direct'; reply: string; promptEn: string; useLastImage: boolean };
+
+// 判断这轮该直接生成还是给出关键词供挑选
+export async function planTurn(history: HistoryEntry[], userText: string): Promise<TurnPlan> {
+    const raw = await runTextModel(PLAN_SYSTEM_PROMPT, history, userText);
+    const parsed = extractJson(raw) as {
+        mode?: string;
+        reply?: string;
+        prompt?: string;
+        useLastImage?: boolean;
+        groups?: { name?: string; options?: unknown[] }[];
+    };
+
+    if (parsed.mode === 'direct' || (parsed.prompt && !parsed.groups)) {
+        if (!parsed.prompt) throw new Error('模型未返回提示词');
+        return {
+            mode: 'direct',
+            reply: String(parsed.reply ?? '好的，马上生成。'),
+            promptEn: String(parsed.prompt),
+            useLastImage: Boolean(parsed.useLastImage),
+        };
+    }
+
     const groups: KeywordGroup[] = (parsed.groups ?? [])
         .map((g) => ({
             name: String(g.name ?? '').trim(),
@@ -68,7 +89,7 @@ export async function summarizeKeywords(
         }))
         .filter((g) => g.name && g.options.length > 0);
     if (groups.length === 0) throw new Error('关键词解析失败');
-    return { reply: String(parsed.reply ?? '这是我总结的关键词，请挑选后生成。'), groups };
+    return { mode: 'keywords', reply: String(parsed.reply ?? '这是我总结的关键词，请挑选后生成。'), groups };
 }
 
 export async function refinePrompt(keywordSummary: string, note: string | undefined): Promise<string> {

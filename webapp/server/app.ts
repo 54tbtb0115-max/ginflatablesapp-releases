@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import type { Conversation, GalleryPage, GenerateRequest, Message } from '../shared/types';
-import { generateImage, refinePrompt, summarizeKeywords, type HistoryEntry } from './ai';
+import { generateImage, planTurn, refinePrompt, type HistoryEntry } from './ai';
 import { config } from './env';
 import { db } from './db';
 import { storage } from './storage';
@@ -124,11 +124,80 @@ function buildHistory(conversationId: string): HistoryEntry[] {
     });
 }
 
-// ---------- 第一步：发文字，AI 总结关键词 ----------
+// 取参考图字节（用于图生图）
+async function loadSourceImage(imageId: string): Promise<{ bytes: Uint8Array; contentType: string } | null> {
+    const row = db.prepare('SELECT r2_key, content_type FROM images WHERE id = ?').get(imageId) as
+        | { r2_key: string; content_type: string }
+        | undefined;
+    if (!row) return null;
+    const bytes = await storage.get(row.r2_key);
+    return bytes ? { bytes, contentType: row.content_type } : null;
+}
+
+// 调生图模型 → 图片写存储 → 元数据入库 → 生成一条图片消息
+async function generateAndStore(opts: {
+    userId: string;
+    conversationId: string;
+    promptCn: string;
+    promptEn: string;
+    keywordsJson?: string;
+    sourceImageId?: string;
+}): Promise<Message> {
+    let source: { bytes: Uint8Array; contentType: string } | undefined;
+    if (opts.sourceImageId) {
+        source = (await loadSourceImage(opts.sourceImageId)) ?? undefined;
+        if (!source) throw new Error('参考图不存在或文件丢失');
+    }
+
+    const { bytes, contentType } = await generateImage(opts.promptEn, source);
+
+    const imageId = randomUUID();
+    const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
+    const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
+    await storage.put(r2Key, bytes, contentType);
+
+    const imageMessage = insertMessage(opts.conversationId, 'assistant', 'image', {
+        imageId,
+        prompt: opts.promptCn,
+        promptEn: opts.promptEn,
+        sourceImageId: opts.sourceImageId,
+    });
+
+    db.prepare(
+        `INSERT INTO images (id, user_id, conversation_id, message_id, kind, r2_key, content_type, prompt, prompt_en, keywords, source_image_id, model, created_at)
+         VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+        imageId,
+        opts.userId,
+        opts.conversationId,
+        imageMessage.id,
+        r2Key,
+        contentType,
+        opts.promptCn,
+        opts.promptEn,
+        opts.keywordsJson ?? null,
+        opts.sourceImageId ?? null,
+        config.ai.imageModel,
+        now()
+    );
+
+    return imageMessage;
+}
+
+// 本会话最近的一张图（生成的或上传的），用于"改上一张图"类指令
+function lastImageId(conversationId: string): string | undefined {
+    const row = db
+        .prepare('SELECT id FROM images WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1')
+        .get(conversationId) as { id: string } | undefined;
+    return row?.id;
+}
+
+// ---------- 发消息：AI 判断是直接生成，还是先给关键词挑选 ----------
 app.post('/api/conversations/:id/chat', async (c) => {
     const conversationId = c.req.param('id');
-    ownedConversation(c.get('userId'), conversationId);
-    const { text } = await c.req.json<{ text: string }>();
+    const userId = c.get('userId');
+    ownedConversation(userId, conversationId);
+    const { text, sourceImageId } = await c.req.json<{ text: string; sourceImageId?: string }>();
     if (!text?.trim()) return c.json({ error: '内容不能为空' }, 400);
 
     const history = buildHistory(conversationId);
@@ -139,8 +208,26 @@ app.post('/api/conversations/:id/chat', async (c) => {
         db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.trim().slice(0, 20), conversationId);
     }
 
-    const keywords = await summarizeKeywords(history, text.trim());
-    const assistantMessage = insertMessage(conversationId, 'assistant', 'keywords', keywords);
+    const plan = await planTurn(history, text.trim());
+
+    // 指令明确：跳过关键词挑选，直接生成
+    if (plan.mode === 'direct') {
+        const source = sourceImageId ?? (plan.useLastImage ? lastImageId(conversationId) : undefined);
+        const replyMessage = insertMessage(conversationId, 'assistant', 'text', { text: plan.reply });
+        const imageMessage = await generateAndStore({
+            userId,
+            conversationId,
+            promptCn: text.trim(),
+            promptEn: plan.promptEn,
+            sourceImageId: source,
+        });
+        return c.json({ messages: [userMessage, replyMessage, imageMessage] });
+    }
+
+    const assistantMessage = insertMessage(conversationId, 'assistant', 'keywords', {
+        reply: plan.reply,
+        groups: plan.groups,
+    });
     return c.json({ messages: [userMessage, assistantMessage] });
 });
 
@@ -164,51 +251,14 @@ app.post('/api/conversations/:id/generate', async (c) => {
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: requestText });
 
     const promptEn = await refinePrompt(selectedSummary, body.note);
-
-    // 图生图：把参考图从存储取出来一起传给图像模型
-    let source: { bytes: Uint8Array; contentType: string } | undefined;
-    if (body.sourceImageId) {
-        const row = db.prepare('SELECT r2_key, content_type FROM images WHERE id = ?').get(body.sourceImageId) as
-            | { r2_key: string; content_type: string }
-            | undefined;
-        if (!row) return c.json({ error: '参考图不存在' }, 404);
-        const bytes = await storage.get(row.r2_key);
-        if (!bytes) return c.json({ error: '参考图文件丢失' }, 404);
-        source = { bytes, contentType: row.content_type };
-    }
-
-    const { bytes, contentType } = await generateImage(promptEn, source);
-
-    // 图片实体写 R2，元数据写 SQLite
-    const imageId = randomUUID();
-    const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
-    const r2Key = `images/${userId}/${conversationId}/${imageId}.${ext}`;
-    await storage.put(r2Key, bytes, contentType);
-
-    const imageMessage = insertMessage(conversationId, 'assistant', 'image', {
-        imageId,
-        prompt: selectedSummary,
-        promptEn,
-        sourceImageId: body.sourceImageId,
-    });
-
-    db.prepare(
-        `INSERT INTO images (id, user_id, conversation_id, message_id, kind, r2_key, content_type, prompt, prompt_en, keywords, source_image_id, model, created_at)
-         VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-        imageId,
+    const imageMessage = await generateAndStore({
         userId,
         conversationId,
-        imageMessage.id,
-        r2Key,
-        contentType,
-        selectedSummary,
+        promptCn: selectedSummary,
         promptEn,
-        JSON.stringify(body.selected),
-        body.sourceImageId ?? null,
-        config.ai.imageModel,
-        now()
-    );
+        keywordsJson: JSON.stringify(body.selected),
+        sourceImageId: body.sourceImageId,
+    });
 
     return c.json({ messages: [userMessage, imageMessage] });
 });

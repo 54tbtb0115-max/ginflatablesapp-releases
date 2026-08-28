@@ -66,8 +66,10 @@ export default function ChatPage() {
         setBusy('thinking');
         try {
             const id = await ensureConversation();
-            const { messages: newMessages } = await api.chat(id, text);
+            const { messages: newMessages } = await api.chat(id, text, refImageId ?? undefined);
             setMessages((ms) => [...ms, ...newMessages]);
+            // AI 判断为明确指令时会直接返回生成的图片，此时参考图已被使用
+            if (newMessages.some((m) => m.type === 'image')) setRefImageId(null);
             setConversations((cs) =>
                 cs.map((c) => (c.id === id && c.title === '新会话' ? { ...c, title: text.slice(0, 20) } : c))
             );
@@ -228,7 +230,7 @@ function ChatWindow({
                 {messages.map((m) => (
                     <MessageBubble key={m.id} message={m} busy={busy} onGenerate={onGenerate} onUseAsRef={onUseAsRef} />
                 ))}
-                {busy === 'thinking' && <PendingBubble text="正在总结关键词…" />}
+                {busy === 'thinking' && <PendingBubble text="思考中…（明确的指令会直接出图，可能需要十几秒）" />}
                 {busy === 'generating' && <PendingBubble text="正在生成图片，通常需要几秒…" />}
                 {error && (
                     <div className="my-3 mx-auto max-w-md rounded-md bg-red-500/10 text-red-500 text-sm px-4 py-2 text-center">
