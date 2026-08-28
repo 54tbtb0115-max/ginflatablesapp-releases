@@ -17,7 +17,6 @@ export default function ChatPage() {
     const [refImageId, setRefImageId] = useState<string | null>(
         (location.state as { refImageId?: string } | null)?.refImageId ?? null
     );
-    const [strength, setStrength] = useState(0.6);
     const bottomRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -88,7 +87,6 @@ export default function ChatPage() {
                 selected,
                 note: note || undefined,
                 sourceImageId: refImageId ?? undefined,
-                strength: refImageId ? strength : undefined,
             });
             setMessages((ms) => [...ms, ...newMessages]);
             setRefImageId(null);
@@ -124,8 +122,6 @@ export default function ChatPage() {
                 busy={busy}
                 error={error}
                 refImageId={refImageId}
-                strength={strength}
-                onStrength={setStrength}
                 onClearRef={() => setRefImageId(null)}
                 onUseAsRef={setRefImageId}
                 onSend={sendText}
@@ -190,8 +186,6 @@ function ChatWindow({
     busy,
     error,
     refImageId,
-    strength,
-    onStrength,
     onClearRef,
     onUseAsRef,
     onSend,
@@ -203,8 +197,6 @@ function ChatWindow({
     busy: Busy;
     error: string | null;
     refImageId: string | null;
-    strength: number;
-    onStrength: (v: number) => void;
     onClearRef: () => void;
     onUseAsRef: (id: string) => void;
     onSend: (text: string) => void;
@@ -251,18 +243,7 @@ function ChatWindow({
                     <img src={imageUrl(refImageId)} alt="参考图" className="h-12 w-12 rounded object-cover" />
                     <div className="flex-1 text-sm text-gray-600 dark:text-gray-100">
                         <p className="font-medium">已设为图生图参考图</p>
-                        <label className="flex items-center gap-2 text-xs text-gray-400 mt-1">
-                            变化强度 {strength.toFixed(1)}
-                            <input
-                                type="range"
-                                min={0.1}
-                                max={1}
-                                step={0.1}
-                                value={strength}
-                                onChange={(e) => onStrength(Number(e.target.value))}
-                                className="w-32"
-                            />
-                        </label>
+                        <p className="text-xs text-gray-400 mt-0.5">生成时会以这张图为基础进行修改</p>
                     </div>
                     <button onClick={onClearRef} className="text-gray-400 hover:text-red-500" title="移除参考图">
                         <i className="ri-close-circle-line text-xl" aria-hidden />

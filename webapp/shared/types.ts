@@ -52,11 +52,11 @@ export type GalleryPage = {
 };
 
 // 生成请求：selected 是用户勾选的关键词（按分组），note 是补充说明
+// 带 sourceImageId 即图生图（以该图为参考进行编辑式生成）
 export type GenerateRequest = {
     selected: Record<string, string[]>;
     note?: string;
     sourceImageId?: string;
-    strength?: number;
 };
 
 export function imageUrl(id: string): string {

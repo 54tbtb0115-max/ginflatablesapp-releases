@@ -1,15 +1,20 @@
-// Workers AI 调用封装：关键词总结、提示词润色、文生图、图生图
+// AI 调用封装：通过 API 中转平台（如 Aiberm）调 Gemini
+// - 关键词总结 / prompt 润色：OpenAI 兼容接口 /v1/chat/completions
+// - 文生图 / 图生图：Gemini 原生接口 /v1beta/models/{model}:generateContent
+//   （图生图 = 把参考图作为 inline_data 一起传给图像模型）
 
 import type { KeywordGroup } from '../shared/types';
 
 export type Env = {
     DB: D1Database;
     BUCKET: R2Bucket;
-    AI: Ai;
     ASSETS: Fetcher;
+    // 中转平台地址，例如 https://aiberm.com
+    AI_BASE_URL: string;
+    // 令牌（sk-...）：wrangler secret put AI_API_KEY；本地开发写在 .dev.vars
+    AI_API_KEY: string;
     TEXT_MODEL: string;
-    T2I_MODEL: string;
-    I2I_MODEL: string;
+    IMAGE_MODEL: string;
 };
 
 export type HistoryEntry = { role: 'user' | 'assistant'; content: string };
@@ -25,26 +30,42 @@ const KEYWORD_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户会用中文
 - 用户描述里明确提到的内容放在对应组的最前面
 - 如果用户是在修改之前的图（例如"改成夜晚"），保留之前的关键词，只更新变化的部分`;
 
-const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for a diffusion image model (Flux / Stable Diffusion). Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition, and quality tags. Keep it under 120 words.`;
+const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for an image generation model. Output ONLY the prompt text, no quotes, no explanations. Be concrete and visual; include subject, scene, style, lighting, composition. If the request is based on a reference image, phrase it as an edit instruction of that image. Keep it under 120 words.`;
+
+function apiHeaders(env: Env): Record<string, string> {
+    return {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.AI_API_KEY}`,
+        'x-goog-api-key': env.AI_API_KEY,
+    };
+}
 
 function extractJson(text: string): unknown {
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
-    if (start === -1 || end <= start) throw new Error(`LLM 未返回 JSON: ${text.slice(0, 200)}`);
+    if (start === -1 || end <= start) throw new Error(`模型未返回 JSON: ${text.slice(0, 200)}`);
     return JSON.parse(text.slice(start, end + 1));
 }
 
 async function runTextModel(env: Env, system: string, history: HistoryEntry[], user: string): Promise<string> {
-    const messages = [
-        { role: 'system', content: system },
-        ...history,
-        { role: 'user', content: user },
-    ];
-    const result = (await env.AI.run(env.TEXT_MODEL as keyof AiModels, { messages, max_tokens: 1024 } as never)) as {
-        response?: string;
-    };
-    if (!result?.response) throw new Error('文本模型没有返回内容');
-    return result.response;
+    const res = await fetch(`${env.AI_BASE_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: apiHeaders(env),
+        body: JSON.stringify({
+            model: env.TEXT_MODEL,
+            messages: [
+                { role: 'system', content: system },
+                ...history,
+                { role: 'user', content: user },
+            ],
+            max_tokens: 1024,
+        }),
+    });
+    if (!res.ok) throw new Error(`文本模型请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error('文本模型没有返回内容');
+    return content;
 }
 
 export async function summarizeKeywords(
@@ -70,6 +91,15 @@ export async function refinePrompt(env: Env, keywordSummary: string, note: strin
     return text.replace(/^["'\s]+|["'\s]+$/g, '');
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+    let bin = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+}
+
 function base64ToBytes(b64: string): Uint8Array {
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
@@ -77,34 +107,48 @@ function base64ToBytes(b64: string): Uint8Array {
     return bytes;
 }
 
-// 不同生图模型返回格式不同：flux 返回 { image: base64 }，SD 系列返回二进制流
-async function normalizeImageResult(result: unknown): Promise<Uint8Array> {
-    if (result instanceof ReadableStream) {
-        return new Uint8Array(await new Response(result).arrayBuffer());
-    }
-    if (result instanceof ArrayBuffer) return new Uint8Array(result);
-    if (result instanceof Uint8Array) return result;
-    const image = (result as { image?: string })?.image;
-    if (typeof image === 'string') return base64ToBytes(image);
-    throw new Error('生图模型返回了无法识别的格式');
-}
+type GeminiPart = {
+    text?: string;
+    inlineData?: { mimeType?: string; data?: string };
+    inline_data?: { mime_type?: string; data?: string };
+};
 
-export async function textToImage(env: Env, promptEn: string): Promise<Uint8Array> {
-    const result = await env.AI.run(env.T2I_MODEL as keyof AiModels, { prompt: promptEn, steps: 8 } as never);
-    return normalizeImageResult(result);
-}
-
-export async function imageToImage(
+// 文生图 / 图生图统一入口：带 source 即为图生图（Gemini 的图像编辑模式）
+export async function generateImage(
     env: Env,
     promptEn: string,
-    sourceImage: Uint8Array,
-    strength: number
-): Promise<Uint8Array> {
-    const result = await env.AI.run(env.I2I_MODEL as keyof AiModels, {
-        prompt: promptEn,
-        image: Array.from(sourceImage),
-        strength,
-        num_steps: 20,
-    } as never);
-    return normalizeImageResult(result);
+    source?: { bytes: Uint8Array; contentType: string }
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const parts: unknown[] = [{ text: promptEn }];
+    if (source) {
+        parts.push({ inline_data: { mime_type: source.contentType, data: bytesToBase64(source.bytes) } });
+    }
+
+    const res = await fetch(`${env.AI_BASE_URL}/v1beta/models/${env.IMAGE_MODEL}:generateContent`, {
+        method: 'POST',
+        headers: apiHeaders(env),
+        body: JSON.stringify({
+            contents: [{ role: 'user', parts }],
+            generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+        }),
+    });
+    if (!res.ok) throw new Error(`生图请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
+
+    const data = (await res.json()) as {
+        candidates?: { content?: { parts?: GeminiPart[] } }[];
+        promptFeedback?: { blockReason?: string };
+    };
+    if (data.promptFeedback?.blockReason) {
+        throw new Error(`生图请求被拒绝：${data.promptFeedback.blockReason}`);
+    }
+    for (const part of data.candidates?.[0]?.content?.parts ?? []) {
+        const inline = part.inlineData ?? part.inline_data;
+        const b64 = inline?.data;
+        if (b64) {
+            const contentType = part.inlineData?.mimeType ?? part.inline_data?.mime_type ?? 'image/png';
+            return { bytes: base64ToBytes(b64), contentType };
+        }
+    }
+    const text = data.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text;
+    throw new Error(`生图模型没有返回图片${text ? `：${text.slice(0, 200)}` : ''}`);
 }

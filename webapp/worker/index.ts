@@ -1,14 +1,7 @@
 import { Hono } from 'hono';
 import { getCookie, setCookie } from 'hono/cookie';
 import type { Conversation, GalleryPage, GenerateRequest, Message } from '../shared/types';
-import {
-    type Env,
-    type HistoryEntry,
-    imageToImage,
-    refinePrompt,
-    summarizeKeywords,
-    textToImage,
-} from './ai';
+import { type Env, type HistoryEntry, generateImage, refinePrompt, summarizeKeywords } from './ai';
 
 type Vars = { userId: string };
 
@@ -169,28 +162,26 @@ app.post('/api/conversations/:id/generate', async (c) => {
 
     const promptEn = await refinePrompt(c.env, selectedSummary, body.note);
 
-    let bytes: Uint8Array;
-    let model: string;
+    // 图生图：把参考图从 R2 取出来一起传给图像模型
+    let source: { bytes: Uint8Array; contentType: string } | undefined;
     if (body.sourceImageId) {
-        const source = await c.env.DB.prepare('SELECT r2_key FROM images WHERE id = ?')
+        const row = await c.env.DB.prepare('SELECT r2_key, content_type FROM images WHERE id = ?')
             .bind(body.sourceImageId)
-            .first<{ r2_key: string }>();
-        if (!source) return c.json({ error: '参考图不存在' }, 404);
-        const object = await c.env.BUCKET.get(source.r2_key);
+            .first<{ r2_key: string; content_type: string }>();
+        if (!row) return c.json({ error: '参考图不存在' }, 404);
+        const object = await c.env.BUCKET.get(row.r2_key);
         if (!object) return c.json({ error: '参考图文件丢失' }, 404);
-        const sourceBytes = new Uint8Array(await object.arrayBuffer());
-        const strength = Math.min(Math.max(body.strength ?? 0.6, 0.1), 1);
-        bytes = await imageToImage(c.env, promptEn, sourceBytes, strength);
-        model = c.env.I2I_MODEL;
-    } else {
-        bytes = await textToImage(c.env, promptEn);
-        model = c.env.T2I_MODEL;
+        source = { bytes: new Uint8Array(await object.arrayBuffer()), contentType: row.content_type };
     }
+
+    const { bytes, contentType } = await generateImage(c.env, promptEn, source);
+    const model = c.env.IMAGE_MODEL;
 
     // 图片实体写 R2，元数据写 D1
     const imageId = uuid();
-    const r2Key = `images/${userId}/${conversationId}/${imageId}.png`;
-    await c.env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType: 'image/png' } });
+    const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
+    const r2Key = `images/${userId}/${conversationId}/${imageId}.${ext}`;
+    await c.env.BUCKET.put(r2Key, bytes, { httpMetadata: { contentType } });
 
     const imageMessage = await insertMessage(c.env, conversationId, 'assistant', 'image', {
         imageId,
@@ -201,7 +192,7 @@ app.post('/api/conversations/:id/generate', async (c) => {
 
     await c.env.DB.prepare(
         `INSERT INTO images (id, user_id, conversation_id, message_id, kind, r2_key, content_type, prompt, prompt_en, keywords, source_image_id, model, created_at)
-         VALUES (?, ?, ?, ?, 'generated', ?, 'image/png', ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, 'generated', ?, ?, ?, ?, ?, ?, ?, ?)`
     )
         .bind(
             imageId,
@@ -209,6 +200,7 @@ app.post('/api/conversations/:id/generate', async (c) => {
             conversationId,
             imageMessage.id,
             r2Key,
+            contentType,
             selectedSummary,
             promptEn,
             JSON.stringify(body.selected),

@@ -18,7 +18,7 @@
 | 后端 | Cloudflare Workers + Hono |
 | 数据库 | Cloudflare D1（表结构见 `schema.sql`） |
 | 图片存储 | Cloudflare R2（`images/{userId}/{conversationId}/{imageId}.png`） |
-| AI | Cloudflare Workers AI：文本模型做关键词总结与 prompt 润色，Flux 文生图，SD img2img 图生图（模型都在 `wrangler.jsonc` 的 `vars` 里，可替换成 Replicate / fal.ai 等外部服务，只需改 `worker/ai.ts`） |
+| AI | 通过 API 中转平台（Aiberm 等）调 **Gemini**：`gemini-2.5-flash` 做关键词总结与 prompt 润色（OpenAI 兼容接口），`gemini-2.5-flash-image` 做文生图和图生图（Gemini 原生 `generateContent` 接口，图生图即把参考图作为 `inline_data` 传入）。平台地址与模型名都在 `wrangler.jsonc` 的 `vars` 里，令牌通过 secret 配置 |
 
 用户识别目前是最简方案：首次访问发一个一年期 `uid` cookie 自动建用户。后续要做真正的登录，只需替换 `worker/index.ts` 里的用户中间件。
 
@@ -42,11 +42,12 @@ webapp/
 ```bash
 cd webapp
 npm install
-npm run db:migrate:local   # 初始化本地 D1
-npm run dev                # vite dev（@cloudflare/vite-plugin 会同时跑 Worker，本地模拟 D1/R2）
+cp .dev.vars.example .dev.vars   # 填入你的中转平台令牌（sk-...）
+npm run db:migrate:local         # 初始化本地 D1
+npm run dev                      # vite dev（@cloudflare/vite-plugin 会同时跑 Worker，本地模拟 D1/R2）
 ```
 
-注意：本地调用 Workers AI 需要先 `wrangler login`（本地开发时 AI 请求会走真实账号计费）。
+`.dev.vars` 已被 .gitignore 忽略，**令牌不要提交到仓库**；万一泄露，去中转平台的「令牌管理」删除重建即可。
 
 ## 部署
 
@@ -54,8 +55,11 @@ npm run dev                # vite dev（@cloudflare/vite-plugin 会同时跑 Wor
 wrangler d1 create ai-image-studio          # 把返回的 database_id 填入 wrangler.jsonc
 wrangler r2 bucket create ai-image-studio-images
 npm run db:migrate                          # 线上建表
+wrangler secret put AI_API_KEY              # 粘贴中转平台的令牌（sk-...）
 npm run deploy                              # 构建并部署
 ```
+
+模型名以中转平台「模型」页列出的为准；要换模型（例如更强的图像模型）只需改 `wrangler.jsonc` 里的 `IMAGE_MODEL` / `TEXT_MODEL` 重新部署。
 
 ## API 一览
 
