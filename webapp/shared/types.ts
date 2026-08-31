@@ -65,7 +65,14 @@ export type GenerateRequest = {
 
 export type ImageModelOption = { id: string; label: string };
 
-export type User = { id: string; username: string };
+export type User = { id: string; username: string; isAdmin?: boolean };
+
+export type AdminStats = {
+    total: number;
+    byModel: { model: string; count: number }[];
+    byUser: { username: string; count: number }[];
+    byDay: { day: string; count: number }[];
+};
 
 export type KeywordStat = {
     group: string;

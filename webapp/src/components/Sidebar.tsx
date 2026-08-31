@@ -45,6 +45,13 @@ export default function Sidebar({
                         <i className="ri-bar-chart-horizontal-line" aria-hidden />
                     </NavLink>
                 </li>
+                {user.isAdmin && (
+                    <li className="flex-grow lg:flex-grow-0">
+                        <NavLink to="/admin" className={tabClass} title="数据统计（管理员）">
+                            <i className="ri-dashboard-3-line" aria-hidden />
+                        </NavLink>
+                    </li>
+                )}
             </ul>
 
             <div className="flex flex-row lg:flex-col items-center my-1 lg:my-4 gap-1">

@@ -1,4 +1,5 @@
 import type {
+    AdminStats,
     Conversation,
     GalleryPage,
     GenerateRequest,
@@ -29,6 +30,8 @@ export const api = {
     changePassword: (oldPassword: string, newPassword: string) =>
         request<{ ok: boolean }>('/api/account/password', json({ oldPassword, newPassword })),
     keywordStats: () => request<{ stats: KeywordStat[]; total: number }>('/api/keywords/stats'),
+    adminStats: (from: number, to: number) =>
+        request<AdminStats>(`/api/admin/stats?from=${from}&to=${to}`),
     models: () => request<{ models: ImageModelOption[]; defaultModelId: string }>('/api/models'),
     listConversations: () => request<{ conversations: Conversation[] }>('/api/conversations'),
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),

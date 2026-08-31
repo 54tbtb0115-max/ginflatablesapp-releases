@@ -3,6 +3,7 @@ import { Route, Routes } from 'react-router-dom';
 import type { User } from '../shared/types';
 import Sidebar from './components/Sidebar';
 import { api } from './lib/api';
+import AdminPage from './pages/AdminPage';
 import ChatPage from './pages/ChatPage';
 import GalleryPage from './pages/GalleryPage';
 import KeywordsPage from './pages/KeywordsPage';
@@ -50,6 +51,7 @@ export default function App() {
                     <Route path="/" element={<ChatPage />} />
                     <Route path="/gallery" element={<GalleryPage />} />
                     <Route path="/keywords" element={<KeywordsPage />} />
+                    {user.isAdmin && <Route path="/admin" element={<AdminPage />} />}
                 </Routes>
             </div>
         </div>

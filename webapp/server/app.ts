@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
-import type { Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
+import type { AdminStats, Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
 import { generateImage, planTurn, refinePrompt, summarizeKeywords, type HistoryEntry } from './ai';
 import { SESSION_DAYS, changePassword, createSession, deleteSession, loginUser, sessionUser } from './auth';
 import { config, resolveImageModel } from './env';
@@ -62,11 +62,53 @@ app.post('/api/account/password', async (c) => {
     return c.json({ ok: true });
 });
 
+const isAdminUser = (username: string) => config.adminUsers.includes(username);
+
 app.get('/api/auth/me', (c) => {
     const token = getCookie(c, 'sid');
     const user = token ? sessionUser(token) : null;
     if (!user) return c.json({ error: '未登录' }, 401);
-    return c.json({ user });
+    return c.json({ user: { ...user, isAdmin: isAdminUser(user.username) } });
+});
+
+// ---------- 管理员统计（仅管理员账号可访问） ----------
+app.get('/api/admin/stats', (c) => {
+    const token = getCookie(c, 'sid');
+    const user = token ? sessionUser(token) : null;
+    if (!user || !isAdminUser(user.username)) return c.json({ error: '无权限' }, 403);
+
+    // 日期范围（epoch 毫秒）；缺省时默认最近 30 天
+    const toRaw = Number(c.req.query('to'));
+    const fromRaw = Number(c.req.query('from'));
+    const to = Number.isFinite(toRaw) && toRaw > 0 ? toRaw : Date.now();
+    const from = Number.isFinite(fromRaw) && fromRaw >= 0 ? fromRaw : to - 30 * 24 * 60 * 60 * 1000;
+    const where = "kind = 'generated' AND created_at >= ? AND created_at <= ?";
+
+    const total = (
+        db.prepare(`SELECT COUNT(*) AS n FROM images WHERE ${where}`).get(from, to) as { n: number }
+    ).n;
+
+    const byModel = db
+        .prepare(`SELECT COALESCE(model,'未知') AS model, COUNT(*) AS count FROM images WHERE ${where} GROUP BY model ORDER BY count DESC`)
+        .all(from, to) as { model: string; count: number }[];
+
+    const byUser = db
+        .prepare(
+            `SELECT COALESCE(u.username,'(已删除)') AS username, COUNT(*) AS count
+             FROM images i LEFT JOIN users u ON u.id = i.user_id
+             WHERE ${where.replace(/kind/g, 'i.kind').replace(/created_at/g, 'i.created_at')}
+             GROUP BY i.user_id ORDER BY count DESC`
+        )
+        .all(from, to) as { username: string; count: number }[];
+
+    const byDay = db
+        .prepare(
+            `SELECT date(created_at/1000,'unixepoch','localtime') AS day, COUNT(*) AS count
+             FROM images WHERE ${where} GROUP BY day ORDER BY day`
+        )
+        .all(from, to) as { day: string; count: number }[];
+
+    return c.json({ total, byModel, byUser, byDay } satisfies AdminStats);
 });
 
 // ---------- 会话 ----------

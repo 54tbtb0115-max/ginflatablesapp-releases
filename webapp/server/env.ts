@@ -9,6 +9,11 @@ function required(name: string): string {
 export const config = {
     port: Number(process.env.PORT ?? 8787),
     dbPath: process.env.DB_PATH ?? 'data/app.db',
+    // 管理员账号（逗号分隔），可访问 /admin 统计页
+    adminUsers: (process.env.ADMIN_USERS ?? 'bianca')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
     // 自定义 DNS 服务器（逗号分隔），留空则用系统默认
     dnsServers: (process.env.DNS_SERVERS ?? '')
         .split(',')
