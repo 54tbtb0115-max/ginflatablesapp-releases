@@ -67,10 +67,23 @@ export type ImageModelOption = { id: string; label: string };
 
 export type User = { id: string; username: string; isAdmin?: boolean };
 
+export type AdminUserStat = {
+    username: string;
+    count: number;
+    cost: number;
+    lastUsed: number;
+    models: { model: string; count: number }[];
+};
+
 export type AdminStats = {
-    total: number;
-    byModel: { model: string; count: number }[];
-    byUser: { username: string; count: number }[];
+    total: number; // 成功生成数
+    totalCost: number; // 预估总花费（美元）
+    activeUsers: number; // 去重用户数
+    avgPerDay: number; // 日均生成量
+    failed: number; // 失败/停止数
+    byType: { textToImage: number; imageToImage: number; hd: number };
+    byModel: { model: string; count: number; cost: number }[];
+    byUser: AdminUserStat[];
     byDay: { day: string; count: number }[];
 };
 

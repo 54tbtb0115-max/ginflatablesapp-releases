@@ -83,23 +83,66 @@ app.get('/api/admin/stats', (c) => {
     const to = Number.isFinite(toRaw) && toRaw > 0 ? toRaw : Date.now();
     const from = Number.isFinite(fromRaw) && fromRaw >= 0 ? fromRaw : to - 30 * 24 * 60 * 60 * 1000;
     const where = "kind = 'generated' AND created_at >= ? AND created_at <= ?";
+    const priceOf = (model: string) => config.imagePrices[model] ?? 0;
 
-    const total = (
-        db.prepare(`SELECT COUNT(*) AS n FROM images WHERE ${where}`).get(from, to) as { n: number }
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM images WHERE ${where}`).get(from, to) as { n: number }).n;
+
+    // 失败/停止数（来自消息，图片表只存成功的）
+    const failed = (
+        db
+            .prepare(
+                `SELECT COUNT(*) AS n FROM messages
+                 WHERE type = 'image' AND json_extract(content,'$.status') = 'failed'
+                 AND created_at >= ? AND created_at <= ?`
+            )
+            .get(from, to) as { n: number }
     ).n;
 
-    const byModel = db
-        .prepare(`SELECT COALESCE(model,'未知') AS model, COUNT(*) AS count FROM images WHERE ${where} GROUP BY model ORDER BY count DESC`)
-        .all(from, to) as { model: string; count: number }[];
-
-    const byUser = db
+    // 生成类型：高清（prompt 以"高清重制"开头）/ 图生图（有参考图）/ 文生图
+    const typeRow = db
         .prepare(
-            `SELECT COALESCE(u.username,'(已删除)') AS username, COUNT(*) AS count
-             FROM images i LEFT JOIN users u ON u.id = i.user_id
-             WHERE ${where.replace(/kind/g, 'i.kind').replace(/created_at/g, 'i.created_at')}
-             GROUP BY i.user_id ORDER BY count DESC`
+            `SELECT
+                SUM(CASE WHEN prompt LIKE '高清重制%' THEN 1 ELSE 0 END) AS hd,
+                SUM(CASE WHEN prompt NOT LIKE '高清重制%' AND source_image_id IS NOT NULL THEN 1 ELSE 0 END) AS i2i,
+                SUM(CASE WHEN prompt NOT LIKE '高清重制%' AND source_image_id IS NULL THEN 1 ELSE 0 END) AS t2i
+             FROM images WHERE ${where}`
         )
-        .all(from, to) as { username: string; count: number }[];
+        .get(from, to) as { hd: number | null; i2i: number | null; t2i: number | null };
+    const byType = { textToImage: typeRow.t2i ?? 0, imageToImage: typeRow.i2i ?? 0, hd: typeRow.hd ?? 0 };
+
+    // 每用户 × 每模型 的明细，用于聚合按模型、按用户、花费
+    const rows = db
+        .prepare(
+            `SELECT COALESCE(u.username,'(已删除)') AS username, COALESCE(i.model,'未知') AS model,
+                    COUNT(*) AS count, MAX(i.created_at) AS last_used
+             FROM images i LEFT JOIN users u ON u.id = i.user_id
+             WHERE i.kind = 'generated' AND i.created_at >= ? AND i.created_at <= ?
+             GROUP BY i.user_id, i.model`
+        )
+        .all(from, to) as { username: string; model: string; count: number; last_used: number }[];
+
+    const modelMap = new Map<string, number>();
+    const userMap = new Map<string, AdminStats['byUser'][number]>();
+    let totalCost = 0;
+    for (const r of rows) {
+        const cost = r.count * priceOf(r.model);
+        totalCost += cost;
+        modelMap.set(r.model, (modelMap.get(r.model) ?? 0) + r.count);
+        let u = userMap.get(r.username);
+        if (!u) {
+            u = { username: r.username, count: 0, cost: 0, lastUsed: 0, models: [] };
+            userMap.set(r.username, u);
+        }
+        u.count += r.count;
+        u.cost += cost;
+        u.lastUsed = Math.max(u.lastUsed, r.last_used);
+        u.models.push({ model: r.model, count: r.count });
+    }
+    const byModel = [...modelMap.entries()]
+        .map(([model, count]) => ({ model, count, cost: count * priceOf(model) }))
+        .sort((a, b) => b.count - a.count);
+    const byUser = [...userMap.values()].sort((a, b) => b.count - a.count);
+    byUser.forEach((u) => u.models.sort((a, b) => b.count - a.count));
 
     const byDay = db
         .prepare(
@@ -108,7 +151,20 @@ app.get('/api/admin/stats', (c) => {
         )
         .all(from, to) as { day: string; count: number }[];
 
-    return c.json({ total, byModel, byUser, byDay } satisfies AdminStats);
+    const spanDays = Math.max(1, Math.ceil((to - from) / (24 * 60 * 60 * 1000)));
+    const avgPerDay = Math.round((total / spanDays) * 10) / 10;
+
+    return c.json({
+        total,
+        totalCost: Math.round(totalCost * 1000) / 1000,
+        activeUsers: userMap.size,
+        avgPerDay,
+        failed,
+        byType,
+        byModel,
+        byUser,
+        byDay,
+    } satisfies AdminStats);
 });
 
 // ---------- 会话 ----------

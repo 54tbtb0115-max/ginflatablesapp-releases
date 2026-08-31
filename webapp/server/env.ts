@@ -14,6 +14,20 @@ export const config = {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean),
+    // 各生图模型单价（美元/张），用于统计页估算花费；可用 IMAGE_PRICES（JSON）覆盖
+    imagePrices: ((): Record<string, number> => {
+        try {
+            const p = JSON.parse(process.env.IMAGE_PRICES ?? '');
+            if (p && typeof p === 'object') return p;
+        } catch {
+            /* 用默认 */
+        }
+        return {
+            'gpt-image-2': 0.036,
+            'gemini-2.5-flash-image': 0.023,
+            'gemini-3-pro-image-preview': 0.055,
+        };
+    })(),
     // 自定义 DNS 服务器（逗号分隔），留空则用系统默认
     dnsServers: (process.env.DNS_SERVERS ?? '')
         .split(',')
