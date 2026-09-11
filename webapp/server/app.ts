@@ -251,7 +251,8 @@ function buildHistory(conversationId: string): HistoryEntry[] {
             text = `${m.content.reply}\n关键词：${m.content.groups
                 .map((g) => `${g.name}=${g.options.join('/')}`)
                 .join('；')}`;
-        else text = `[已生成图片，提示词：${m.content.prompt}]`;
+        else if (m.role === 'user') text = '[备注：用户上传了一张参考图，后续修改都基于这张图]';
+        else text = `[备注：系统已按提示词生成并展示了图片。提示词：${m.content.prompt}]`;
         return { role: m.role, content: text };
     });
 }

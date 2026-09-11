@@ -132,9 +132,37 @@ const FORCE_DIRECT_SUFFIX = `
 
 【补充指令】刚才你在 chat 模式里承诺了要生成/重新设计图片，但 chat 模式不会出图。用户就是要图，这次必须输出 direct 模式，并结合对话上下文（包括用户指出的遗漏要素）写出完整的英文 prompt。`;
 
-export async function planTurn(history: HistoryEntry[], userText: string, forced = false): Promise<TurnPlan> {
-    const raw = await runTextModel(forced ? PLAN_SYSTEM_PROMPT + FORCE_DIRECT_SUFFIX : PLAN_SYSTEM_PROMPT, history, userText);
-    const parsed = extractJson(raw) as {
+const JSON_ONLY_SUFFIX = `
+
+【补充指令】你上一次的回答没有按要求输出 JSON（把话直接说了出来，或者模仿了对话记录里"[已生成图片，提示词：...]"的写法）。对话记录里方括号包起来的内容只是系统给你看的备注，不是你该输出的格式。这次必须只输出一个 JSON 对象，不要任何其他文字。`;
+
+// 模型偶尔不按 JSON 回答（常见于模仿了历史记录里的备注格式）：兜底从"提示词：xxx"里抠出 prompt 当作 direct
+function salvagePlan(raw: string): TurnPlan | null {
+    const m = raw.match(/提示词[：:]\s*([^\]\n]{20,})/);
+    if (!m) return null;
+    const reply = raw.split(/[\[\n]/)[0].trim() || '好的，马上生成。';
+    console.warn('planTurn: 模型未返回 JSON，从文本中抠出提示词兜底生成');
+    return { mode: 'direct', reply, promptEn: m[1].trim().replace(/[\]"'。]+$/, ''), useLastImage: true };
+}
+
+export async function planTurn(history: HistoryEntry[], userText: string, forced = false, jsonRetried = false): Promise<TurnPlan> {
+    let system = PLAN_SYSTEM_PROMPT;
+    if (forced) system += FORCE_DIRECT_SUFFIX;
+    if (jsonRetried) system += JSON_ONLY_SUFFIX;
+    const raw = await runTextModel(system, history, userText);
+    let parsedUnknown: unknown;
+    try {
+        parsedUnknown = extractJson(raw);
+    } catch (err) {
+        if (!jsonRetried) {
+            console.warn('planTurn: 模型未返回 JSON，追加只输出 JSON 的指令重问一次');
+            return planTurn(history, userText, forced, true);
+        }
+        const salvaged = salvagePlan(raw);
+        if (salvaged) return salvaged;
+        throw err;
+    }
+    const parsed = parsedUnknown as {
         mode?: string;
         reply?: string;
         prompt?: string;
@@ -148,7 +176,7 @@ export async function planTurn(history: HistoryEntry[], userText: string, forced
         // 这种情况再问一次，强制它给出 direct 计划。
         if (!forced && PROMISE_PATTERN.test(reply)) {
             console.warn('planTurn: chat 回复承诺了生成但没给 prompt，改为强制 direct 重问');
-            return planTurn(history, userText, true);
+            return planTurn(history, userText, true, jsonRetried);
         }
         return { mode: 'chat', reply };
     }
