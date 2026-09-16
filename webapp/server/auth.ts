@@ -22,7 +22,7 @@ export type AuthUser = { id: string; username: string };
 
 export function registerUser(username: string, password: string): AuthUser {
     username = username.trim();
-    if (!/^[\w一-龥-]{2,30}$/.test(username)) throw new Error('用户名需为 2-30 位的字母、数字、中文或下划线');
+    if (!/^[\w一-龥-]{1,30}$/.test(username)) throw new Error('用户名需为 1-30 位的字母、数字、中文或下划线');
     if (password.length < 6) throw new Error('密码至少 6 位');
     const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
     if (exists) throw new Error('用户名已被使用');
