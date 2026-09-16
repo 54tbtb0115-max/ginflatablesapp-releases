@@ -17,6 +17,8 @@ export type ImageContent = {
     prompt: string;
     promptEn?: string;
     sourceImageId?: string;
+    // 多参考图（图一参考 / 图二画布 等）；单图时也可只放一个
+    sourceImageIds?: string[];
     // pending = 后台生成中；failed = 生成失败；不存在 = 已完成
     status?: 'pending' | 'failed';
     error?: string;
@@ -60,6 +62,10 @@ export type GenerateRequest = {
     selected: Record<string, string[]>;
     note?: string;
     sourceImageId?: string;
+    // 多参考图；有值时优先于 sourceImageId
+    sourceImageIds?: string[];
+    // 精确模式：只按用户指令处理，不做风格改写、不额外发挥
+    faithful?: boolean;
     modelId?: string;
 };
 

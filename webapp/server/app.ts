@@ -2,7 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { AdminStats, Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
-import { generateImage, planTurn, refinePrompt, summarizeKeywords, type HistoryEntry } from './ai';
+import {
+    FAITHFUL_HINT,
+    faithfulPrompt,
+    generateImage,
+    planTurn,
+    refinePrompt,
+    type HistoryEntry,
+    type ImageSource,
+} from './ai';
 import { SESSION_DAYS, changePassword, createSession, deleteSession, loginUser, sessionUser } from './auth';
 import { config, resolveImageModel } from './env';
 import { db } from './db';
@@ -282,18 +290,22 @@ function startGeneration(opts: {
     promptCn: string;
     promptEn: string;
     selected?: Record<string, string[]>;
-    sourceImageId?: string;
+    // 参考图：支持多张（图一参考、图二画布等），按顺序传给模型
+    sourceImageIds?: string[];
     // 用户选择的生图模型 id（realistic / fast）
     modelId?: string;
 }): Message {
     const spec = resolveImageModel(opts.modelId);
     const model = spec.model;
     const imageId = randomUUID();
+    const sourceIds = (opts.sourceImageIds ?? []).filter(Boolean);
     const base = {
         imageId,
         prompt: opts.promptCn,
         promptEn: opts.promptEn,
-        sourceImageId: opts.sourceImageId,
+        // 兼容旧字段：首张作为主参考图；完整列表放 sourceImageIds
+        sourceImageId: sourceIds[0],
+        sourceImageIds: sourceIds.length > 0 ? sourceIds : undefined,
     };
     const message = insertMessage(opts.conversationId, 'assistant', 'image', { ...base, status: 'pending' });
     const controller = new AbortController();
@@ -301,15 +313,16 @@ function startGeneration(opts: {
 
     void (async () => {
         try {
-            let source: { bytes: Uint8Array; contentType: string } | undefined;
-            if (opts.sourceImageId) {
-                source = (await loadSourceImage(opts.sourceImageId)) ?? undefined;
-                if (!source) throw new Error('参考图不存在或文件丢失');
+            const sources: ImageSource[] = [];
+            for (const id of sourceIds) {
+                const img = await loadSourceImage(id);
+                if (!img) throw new Error('参考图不存在或文件丢失');
+                sources.push(img);
             }
 
             const { bytes, contentType } = await generateImage(
                 opts.promptEn,
-                source,
+                sources,
                 { api: spec.api, model: spec.model, size: spec.size },
                 controller.signal
             );
@@ -330,7 +343,7 @@ function startGeneration(opts: {
                 opts.promptCn,
                 opts.promptEn,
                 opts.selected ? JSON.stringify(opts.selected) : null,
-                opts.sourceImageId ?? null,
+                sourceIds[0] ?? null,
                 model,
                 now()
             );
@@ -381,12 +394,21 @@ app.post('/api/conversations/:id/chat', async (c) => {
     const conversationId = c.req.param('id');
     const userId = c.get('userId');
     ownedConversation(userId, conversationId);
-    const { text, sourceImageId, modelId } = await c.req.json<{
+    const body = await c.req.json<{
         text: string;
         sourceImageId?: string;
+        sourceImageIds?: string[];
+        faithful?: boolean;
         modelId?: string;
     }>();
+    const text = body.text;
+    const modelId = body.modelId;
     if (!text?.trim()) return c.json({ error: '内容不能为空' }, 400);
+
+    // 前端显式勾选的参考图（可多张）；兼容旧的单图字段
+    const explicitRefs = (body.sourceImageIds ?? (body.sourceImageId ? [body.sourceImageId] : [])).filter(Boolean);
+    // 精确模式：前端开关，或用户措辞里出现“严格/精确/只/完全按照/不要改动…”等词
+    const faithful = Boolean(body.faithful) || FAITHFUL_HINT.test(text);
 
     const history = buildHistory(conversationId);
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: text.trim() });
@@ -396,8 +418,25 @@ app.post('/api/conversations/:id/chat', async (c) => {
         db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.trim().slice(0, 20), conversationId);
     }
 
-    const hasImage = lastImageId(conversationId) !== undefined;
-    let plan = await planTurn(history, text.trim());
+    // 精确模式：跳过 planner 的风格改写和关键词步骤，忠实把用户指令译成英文直接出图
+    if (faithful) {
+        const sources = explicitRefs.length > 0 ? explicitRefs : [lastImageId(conversationId)].filter(Boolean) as string[];
+        const promptEn = await faithfulPrompt(history, text.trim(), sources.length > 0);
+        const replyMessage = insertMessage(conversationId, 'assistant', 'text', {
+            text: sources.length > 0 ? '好的，严格按你的要求修改，其它部分保持不变。' : '好的，严格按你的描述生成。',
+        });
+        const imageMessage = startGeneration({
+            userId,
+            conversationId,
+            promptCn: text.trim(),
+            promptEn,
+            sourceImageIds: sources,
+            modelId,
+        });
+        return c.json({ messages: [userMessage, replyMessage, imageMessage] });
+    }
+
+    const plan = await planTurn(history, text.trim());
 
     // 不是画图需求 → 只回复文字，不生成图片
     if (plan.mode === 'chat') {
@@ -405,21 +444,21 @@ app.post('/api/conversations/:id/chat', async (c) => {
         return c.json({ messages: [userMessage, replyMessage] });
     }
 
-    // 会话里还没生成过图片时，画新图一律先走关键词挑选（把 direct 转为 keywords）
-    if (plan.mode === 'direct' && !hasImage) {
-        plan = await summarizeKeywords(history, text.trim());
-    }
-
-    // 指令明确：跳过关键词挑选，直接生成
+    // 指令明确：直接生成（不再强制先走关键词挑选；只有模型判断需求模糊时才会返回 keywords）
     if (plan.mode === 'direct') {
-        const source = sourceImageId ?? (plan.useLastImage ? lastImageId(conversationId) : undefined);
+        const sources =
+            explicitRefs.length > 0
+                ? explicitRefs
+                : plan.useLastImage
+                  ? ([lastImageId(conversationId)].filter(Boolean) as string[])
+                  : [];
         const replyMessage = insertMessage(conversationId, 'assistant', 'text', { text: plan.reply });
         const imageMessage = startGeneration({
             userId,
             conversationId,
             promptCn: text.trim(),
             promptEn: plan.promptEn,
-            sourceImageId: source,
+            sourceImageIds: sources,
             modelId,
         });
         return c.json({ messages: [userMessage, replyMessage, imageMessage] });
@@ -445,9 +484,10 @@ app.post('/api/conversations/:id/generate', async (c) => {
         .join('；');
     if (!selectedSummary) return c.json({ error: '请至少选择一个关键词' }, 400);
 
+    const refs = (body.sourceImageIds ?? (body.sourceImageId ? [body.sourceImageId] : [])).filter(Boolean);
     // 把用户的选择也记为一条消息，后续对话（例如"改成夜晚"）才有上下文
     const requestText = `请按这些关键词生成图片：${selectedSummary}${body.note ? `。补充：${body.note}` : ''}${
-        body.sourceImageId ? '（基于参考图）' : ''
+        refs.length > 0 ? '（基于参考图）' : ''
     }`;
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: requestText });
 
@@ -458,7 +498,7 @@ app.post('/api/conversations/:id/generate', async (c) => {
         promptCn: selectedSummary,
         promptEn,
         selected: body.selected,
-        sourceImageId: body.sourceImageId,
+        sourceImageIds: refs,
         modelId: body.modelId,
     });
 
@@ -533,7 +573,7 @@ app.post('/api/conversations/:id/hd', async (c) => {
         conversationId,
         promptCn: `高清重制：${row.prompt ?? ''}`,
         promptEn,
-        sourceImageId: row.id,
+        sourceImageIds: [row.id],
         modelId: 'realistic',
     });
     return c.json({ messages: [message] });

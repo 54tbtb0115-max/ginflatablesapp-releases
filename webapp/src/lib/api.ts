@@ -37,10 +37,16 @@ export const api = {
     createConversation: () => request<{ conversation: Conversation }>('/api/conversations', { method: 'POST' }),
     listMessages: (conversationId: string) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/messages`),
-    chat: (conversationId: string, text: string, sourceImageId?: string, modelId?: string) =>
+    chat: (
+        conversationId: string,
+        text: string,
+        sourceImageIds?: string[],
+        modelId?: string,
+        faithful?: boolean
+    ) =>
         request<{ messages: Message[] }>(
             `/api/conversations/${conversationId}/chat`,
-            json({ text, sourceImageId, modelId })
+            json({ text, sourceImageIds, modelId, faithful })
         ),
     generate: (conversationId: string, body: GenerateRequest) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),

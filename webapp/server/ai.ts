@@ -18,11 +18,11 @@ const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消
 - prompt：结合对话上下文写出完整、具体的英文提示词，风格为真实照片而非营销渲染图。除非用户明确要求卡通/插画风，否则遵循纪实写实公式：以 "Wide/Close-up documentary photograph of ..." 开头，用自然光和真实材质质感，结尾加 "Realistic photography, sharp detail"，并在不与需求冲突时补上 no readable text, no logos（画面本就没有人物时才加 no visible faces；用户想要人物则保留并描述自然的姿态）；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger..."）
 - useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
-情况 B（keywords，需要细化）：用户要画一个全新的画面，信息还比较模糊、值得让用户挑选关键词来细化时用。
+情况 B（keywords，需要细化）：仅当用户想画全新画面、但描述非常模糊（比如只说"画个城堡""来张海报"这种缺主体/场景/风格信息的），才用关键词让用户挑选来补全。只要用户已经把想要的画面说清楚了（哪怕是新画面），就不要用 keywords，直接用 direct 出图，忠实按用户说的来。
 输出格式：{"mode": "keywords", "reply": "一句简短的中文回应", "groups": [{"name": "场景", "options": ["...", "..."]}, {"name": "主体", "options": ["..."]}, {"name": "风格", "options": ["..."]}, {"name": "光线", "options": ["..."]}, {"name": "构图", "options": ["..."]}]}
 - 分组固定为：场景、主体、风格、光线、构图；每组 2-5 个简短中文词组选项；用户明确提到的内容放在对应组最前面
 
-判断原则：先判断是不是画图需求——不是就用 chat；是画图需求时，对已有图片的修改和明确的具体指令用 direct，描述全新画面时用 keywords。
+判断原则：先判断是不是画图需求——不是就用 chat；是画图需求时，只要指令说得清楚（无论是改图还是画新图）就一律 direct 直接出图，忠实还原用户所说，不要自作主张加风格或元素；只有描述确实太模糊、缺关键信息时才用 keywords。
 铁律：chat 模式只是聊天，系统不会生成任何图片，所以 chat 的 reply 里绝不能出现"马上为您生成""正在重新设计""请稍候"这类承诺；只要你打算生成或重画，就必须用 direct 并给出 prompt。`;
 
 const KEYWORD_ONLY_PROMPT = `你是一个 AI 绘画助手。用户会用中文描述想要生成的画面，你要结合本次对话的上下文，把描述总结成可勾选的关键词，供用户挑选后交给绘画模型。
@@ -44,6 +44,23 @@ const REALISM_STYLE_GUIDE = `Write it as a realistic photograph, NOT a marketing
 - Avoid over-saturated cartoon colors, rainbows, and obviously composited elements unless explicitly requested.`;
 
 const PROMPT_REFINE_SYSTEM = `You turn Chinese image keywords into one English prompt for a photo-realistic image generation model. Output ONLY the prompt text, no quotes, no explanations. Include subject, scene, lighting, composition, concisely and vividly. If the request is based on a reference image, phrase it as an edit instruction of that image while keeping the described realistic-photo style. ${REALISM_STYLE_GUIDE} Keep it under 130 words.`;
+
+// 精确模式：用户这类措辞说明要“完全照做”，此时跳过 planner 的风格改写与关键词步骤，忠实执行
+export const FAITHFUL_HINT =
+    /(严格|精确|精准|准确|完全按照|完全按|照着做|照原|一模一样|原封不动|原样|只(改|把|保留|替换|修改|需要|想要|要)|仅(改|保留|替换|需要)|不要(改|动|额外|自行|发挥|创作|添加|增加|多)|别(改|动|额外|发挥|加)|保持[^，。]*不(变|动)|其(他|余)[^，。]*不(变|动)|exact|exactly|only change|do not change|keep [^,.]* unchanged|as[- ]?is)/i;
+
+// 忠实翻译：把用户指令原样译成英文，不加任何风格或额外细节
+const FAITHFUL_TRANSLATE_SYSTEM = `You convert a user's image instruction (usually Chinese) into a concise English instruction for an image generation / editing model.
+STRICT RULES:
+- Translate ONLY what the user actually said. Do NOT add any style, lighting, mood, camera, composition, background, color, or quality words the user did not mention.
+- Do NOT turn it into a "documentary photograph" or impose any style of your own.
+- If the user restricts the change to a specific part, or says to keep the rest unchanged, state that constraint explicitly.
+- Preserve the user's exact intent and any references to "image 1 / image 2 / the reference / the previous image".
+Output ONLY the English instruction, no quotes, no explanation.`;
+
+// 有参考图时追加的硬约束：只改要求的部分，其余保持不变
+const FAITHFUL_EDIT_GUARD =
+    ' Strictly follow the instruction. Only modify what is explicitly requested; keep every other part of the provided image(s) exactly unchanged. Do not add, remove, restyle, recolor, or reinvent anything that was not asked for.';
 
 const apiHeaders = (): Record<string, string> => ({
     'Content-Type': 'application/json',
@@ -202,29 +219,51 @@ export async function refinePrompt(keywordSummary: string, note: string | undefi
     return text.replace(/^["'\s]+|["'\s]+$/g, '');
 }
 
+// 精确模式：把用户指令忠实翻成英文（不加风格、不额外发挥）；有参考图时追加“只改要求处”的硬约束
+export async function faithfulPrompt(
+    history: HistoryEntry[],
+    userText: string,
+    hasSource: boolean
+): Promise<string> {
+    const en = (await runTextModel(FAITHFUL_TRANSLATE_SYSTEM, history, userText))
+        .trim()
+        .replace(/^["'\s]+|["'\s]+$/g, '');
+    return hasSource ? `${en}${FAITHFUL_EDIT_GUARD}` : en;
+}
+
 type GeminiPart = {
     text?: string;
     inlineData?: { mimeType?: string; data?: string };
     inline_data?: { mime_type?: string; data?: string };
 };
 
-// 文生图 / 图生图统一入口：带 source 即为图生图
+export type ImageSource = { bytes: Uint8Array; contentType: string };
+
+// 文生图 / 图生图统一入口：带参考图即为图生图（支持多张：图一参考、图二画布等）
 // spec 指定用哪个模型（接口风格、模型名、尺寸）
 export async function generateImage(
     promptEn: string,
-    source: { bytes: Uint8Array; contentType: string } | undefined,
+    sources: ImageSource[],
     spec: { api: 'gemini' | 'openai'; model: string; size: string | null },
     signal?: AbortSignal
 ): Promise<{ bytes: Uint8Array; contentType: string }> {
     const { model, size } = spec;
 
     if (spec.api === 'openai') {
-        return generateImageOpenAI(model, size, promptEn, source, signal);
+        // OpenAI 图像编辑接口只接受一张底图，取最后一张（约定为“画布/主图”）
+        return generateImageOpenAI(model, size, promptEn, sources[sources.length - 1], signal);
     }
 
     const imageSize = size;
-    const parts: unknown[] = [{ text: promptEn }];
-    if (source) {
+    // 多图时明确告诉模型每张图的顺序（Image 1 / Image 2 …），便于“图一是参考、在图二上改”这类指令
+    const leadText =
+        sources.length > 1
+            ? `You are given ${sources.length} images below, in order: ${sources
+                  .map((_, i) => `Image ${i + 1}`)
+                  .join(', ')}. Follow the instruction about which image is the reference and which is the one to edit. ${promptEn}`
+            : promptEn;
+    const parts: unknown[] = [{ text: leadText }];
+    for (const source of sources) {
         parts.push({
             inline_data: { mime_type: source.contentType, data: Buffer.from(source.bytes).toString('base64') },
         });
