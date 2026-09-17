@@ -6,6 +6,7 @@ import type {
     ImageModelOption,
     KeywordStat,
     Message,
+    RefRole,
     User,
 } from '../../shared/types';
 
@@ -40,18 +41,28 @@ export const api = {
     chat: (
         conversationId: string,
         text: string,
-        sourceImageIds?: string[],
-        modelId?: string,
-        faithful?: boolean
+        opts?: { sourceImageIds?: string[]; sourceRoles?: RefRole[]; modelId?: string }
     ) =>
         request<{ messages: Message[] }>(
             `/api/conversations/${conversationId}/chat`,
-            json({ text, sourceImageIds, modelId, faithful })
+            json({ text, ...opts })
         ),
     generate: (conversationId: string, body: GenerateRequest) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/generate`, json(body)),
     hdRegenerate: (conversationId: string, imageId: string) =>
         request<{ messages: Message[] }>(`/api/conversations/${conversationId}/hd`, json({ imageId })),
+    // 局部编辑：标记改图 / 擦除 / 扩图 / 抠图
+    edit: (
+        conversationId: string,
+        body: {
+            imageId: string;
+            op: 'inpaint' | 'erase' | 'outpaint' | 'cutout';
+            maskPng?: string;
+            prompt?: string;
+            direction?: 'up' | 'down' | 'left' | 'right' | 'all';
+            ratio?: number;
+        }
+    ) => request<{ messages: Message[] }>(`/api/conversations/${conversationId}/edit`, json(body)),
     cancel: (conversationId: string, messageId: string) =>
         request<{ ok: boolean }>(`/api/conversations/${conversationId}/cancel`, json({ messageId })),
     upload: (conversationId: string, file: File) =>

@@ -42,21 +42,23 @@ export const config = {
         // 可在发送时选择的生图模型列表；模型名/尺寸可用环境变量覆盖，默认开箱即用
         imageModels: [
             {
-                id: 'realistic',
-                label: '写实（gpt-image-2）',
-                api: 'openai' as const,
-                model: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
-                size: process.env.OPENAI_IMAGE_SIZE || 'auto',
+                id: 'quality',
+                label: '高质量（Gemini 3 Pro）',
+                api: 'gemini' as const,
+                model: process.env.GEMINI_IMAGE_MODEL ?? 'gemini-3-pro-image-preview',
+                size: process.env.GEMINI_IMAGE_SIZE || null,
             },
             {
                 id: 'fast',
-                label: '快速（Gemini）',
+                label: '快速（Gemini Flash）',
                 api: 'gemini' as const,
-                model: process.env.GEMINI_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
+                model: process.env.GEMINI_FAST_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
                 size: process.env.GEMINI_IMAGE_SIZE || null,
             },
         ],
-        defaultModelId: process.env.DEFAULT_IMAGE_MODEL ?? 'realistic',
+        defaultModelId: process.env.DEFAULT_IMAGE_MODEL ?? 'quality',
+        // 局部编辑（标记改图/擦除/扩图/抠图）需要 mask，只能用 gpt-image
+        editModel: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
     },
     r2:
         process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET

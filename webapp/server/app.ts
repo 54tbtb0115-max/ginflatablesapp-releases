@@ -1,16 +1,29 @@
 import { randomUUID } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
-import type { AdminStats, Conversation, GalleryPage, GenerateRequest, KeywordStat, Message } from '../shared/types';
+import type {
+    AdminStats,
+    Conversation,
+    GalleryPage,
+    GenerateRequest,
+    KeywordStat,
+    Message,
+    RefRole,
+} from '../shared/types';
 import {
-    FAITHFUL_HINT,
-    faithfulPrompt,
+    FAITHFUL_EDIT_GUARD,
+    NON_PHOTO_STYLE_HINT,
+    REALISM_LAYER,
+    editImage,
     generateImage,
     planTurn,
+    refRolePreamble,
     refinePrompt,
+    translateEditInstruction,
     type HistoryEntry,
     type ImageSource,
 } from './ai';
+import { buildEditMask, compositeMasked, dilateSelection, padForOutpaint, pngDims, toPngRGBA, type Dir } from './imageops';
 import { SESSION_DAYS, changePassword, createSession, deleteSession, loginUser, sessionUser } from './auth';
 import { config, resolveImageModel } from './env';
 import { db } from './db';
@@ -294,6 +307,8 @@ function startGeneration(opts: {
     sourceImageIds?: string[];
     // 用户选择的生图模型 id（realistic / fast）
     modelId?: string;
+    // 自定义产图逻辑（局部编辑/抠图等）；给了就用它，否则走默认文生图/图生图
+    produce?: (signal: AbortSignal) => Promise<{ bytes: Uint8Array; contentType: string }>;
 }): Message {
     const spec = resolveImageModel(opts.modelId);
     const model = spec.model;
@@ -313,19 +328,24 @@ function startGeneration(opts: {
 
     void (async () => {
         try {
-            const sources: ImageSource[] = [];
-            for (const id of sourceIds) {
-                const img = await loadSourceImage(id);
-                if (!img) throw new Error('参考图不存在或文件丢失');
-                sources.push(img);
+            let bytes: Uint8Array;
+            let contentType: string;
+            if (opts.produce) {
+                ({ bytes, contentType } = await opts.produce(controller.signal));
+            } else {
+                const sources: ImageSource[] = [];
+                for (const id of sourceIds) {
+                    const img = await loadSourceImage(id);
+                    if (!img) throw new Error('参考图不存在或文件丢失');
+                    sources.push(img);
+                }
+                ({ bytes, contentType } = await generateImage(
+                    opts.promptEn,
+                    sources,
+                    { api: spec.api, model: spec.model, size: spec.size },
+                    controller.signal
+                ));
             }
-
-            const { bytes, contentType } = await generateImage(
-                opts.promptEn,
-                sources,
-                { api: spec.api, model: spec.model, size: spec.size },
-                controller.signal
-            );
             const ext = contentType === 'image/jpeg' ? 'jpg' : contentType.split('/')[1] ?? 'png';
             const r2Key = `images/${opts.userId}/${opts.conversationId}/${imageId}.${ext}`;
             await storage.put(r2Key, bytes, contentType);
@@ -398,17 +418,16 @@ app.post('/api/conversations/:id/chat', async (c) => {
         text: string;
         sourceImageId?: string;
         sourceImageIds?: string[];
-        faithful?: boolean;
+        sourceRoles?: RefRole[];
         modelId?: string;
     }>();
     const text = body.text;
     const modelId = body.modelId;
     if (!text?.trim()) return c.json({ error: '内容不能为空' }, 400);
 
-    // 前端显式勾选的参考图（可多张）；兼容旧的单图字段
+    // 前端显式上传/选中的参考图（可多张）及其角色；兼容旧的单图字段
     const explicitRefs = (body.sourceImageIds ?? (body.sourceImageId ? [body.sourceImageId] : [])).filter(Boolean);
-    // 精确模式：前端开关，或用户措辞里出现“严格/精确/只/完全按照/不要改动…”等词
-    const faithful = Boolean(body.faithful) || FAITHFUL_HINT.test(text);
+    const explicitRoles = body.sourceRoles ?? [];
 
     const history = buildHistory(conversationId);
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: text.trim() });
@@ -418,24 +437,7 @@ app.post('/api/conversations/:id/chat', async (c) => {
         db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.trim().slice(0, 20), conversationId);
     }
 
-    // 精确模式：跳过 planner 的风格改写和关键词步骤，忠实把用户指令译成英文直接出图
-    if (faithful) {
-        const sources = explicitRefs.length > 0 ? explicitRefs : [lastImageId(conversationId)].filter(Boolean) as string[];
-        const promptEn = await faithfulPrompt(history, text.trim(), sources.length > 0);
-        const replyMessage = insertMessage(conversationId, 'assistant', 'text', {
-            text: sources.length > 0 ? '好的，严格按你的要求修改，其它部分保持不变。' : '好的，严格按你的描述生成。',
-        });
-        const imageMessage = startGeneration({
-            userId,
-            conversationId,
-            promptCn: text.trim(),
-            promptEn,
-            sourceImageIds: sources,
-            modelId,
-        });
-        return c.json({ messages: [userMessage, replyMessage, imageMessage] });
-    }
-
+    // 默认忠实直出：planner 只做分类(chat/画图/需细化)并忠实翻译，不再套摄影公式
     const plan = await planTurn(history, text.trim());
 
     // 不是画图需求 → 只回复文字，不生成图片
@@ -444,20 +446,34 @@ app.post('/api/conversations/:id/chat', async (c) => {
         return c.json({ messages: [userMessage, replyMessage] });
     }
 
-    // 指令明确：直接生成（不再强制先走关键词挑选；只有模型判断需求模糊时才会返回 keywords）
     if (plan.mode === 'direct') {
-        const sources =
-            explicitRefs.length > 0
-                ? explicitRefs
-                : plan.useLastImage
-                  ? ([lastImageId(conversationId)].filter(Boolean) as string[])
-                  : [];
+        // 参考图优先用前端显式选的（带角色）；否则若是"改上一张"则取上一张图
+        const usingExplicit = explicitRefs.length > 0;
+        const sources = usingExplicit
+            ? explicitRefs
+            : plan.useLastImage
+              ? ([lastImageId(conversationId)].filter(Boolean) as string[])
+              : [];
+
+        const isEdit = !usingExplicit && sources.length > 0; // 在上一张图上改
+        // 真实感层：文生图 / 多图合成时加（去 AI 味）；改图时不加(保持与原图一致)；用户要非写实风格时跳过
+        const wantRealism = !isEdit && !NON_PHOTO_STYLE_HINT.test(text);
+
+        let promptEn = plan.promptEn;
+        if (usingExplicit) {
+            // 多图/带角色：把"每张图是什么"讲清楚，拼在指令前面
+            const roles: RefRole[] = sources.map((_, i) => explicitRoles[i] ?? 'ref');
+            promptEn = refRolePreamble(roles) + promptEn;
+        }
+        if (isEdit) promptEn += FAITHFUL_EDIT_GUARD; // 改上一张图：只改要求处、其余不变
+        if (wantRealism) promptEn += REALISM_LAYER;
+
         const replyMessage = insertMessage(conversationId, 'assistant', 'text', { text: plan.reply });
         const imageMessage = startGeneration({
             userId,
             conversationId,
             promptCn: text.trim(),
-            promptEn: plan.promptEn,
+            promptEn,
             sourceImageIds: sources,
             modelId,
         });
@@ -491,7 +507,12 @@ app.post('/api/conversations/:id/generate', async (c) => {
     }`;
     const userMessage = insertMessage(conversationId, 'user', 'text', { text: requestText });
 
-    const promptEn = await refinePrompt(selectedSummary, body.note);
+    let promptEn = await refinePrompt(selectedSummary, body.note);
+    if (refs.length > 0) {
+        const roles: RefRole[] = refs.map((_, i) => body.sourceRoles?.[i] ?? 'ref');
+        promptEn = refRolePreamble(roles) + promptEn;
+    }
+    if (!NON_PHOTO_STYLE_HINT.test(`${selectedSummary} ${body.note ?? ''}`)) promptEn += REALISM_LAYER;
     const imageMessage = startGeneration({
         userId,
         conversationId,
@@ -574,7 +595,95 @@ app.post('/api/conversations/:id/hd', async (c) => {
         promptCn: `高清重制：${row.prompt ?? ''}`,
         promptEn,
         sourceImageIds: [row.id],
-        modelId: 'realistic',
+        modelId: 'quality',
+    });
+    return c.json({ messages: [message] });
+});
+
+// ---------- 局部编辑：标记改图 / 擦除 / 扩图 / 抠图 ----------
+// 统一走 gpt-image 的 /images/edits；标记改图与擦除用蒙版并把结果羽化合成回原图（选区外保持原像素）
+const ERASE_PROMPT =
+    'Completely remove the object(s) in the edited (masked) area, together with their shadows, reflections and contact marks within this area. Realistically reconstruct the underlying background surface (floor, table, wall, ground) so the area looks natural and empty, matching the surrounding lighting, color and texture. Do not add any new object. Keep everything outside unchanged.';
+const OUTPAINT_PROMPT =
+    'Extend and continue the scene naturally into the newly added area, matching the existing perspective, lighting, colors and style for a seamless continuation. Do not alter the original region.';
+const CUTOUT_PROMPT =
+    'Isolate the main foreground subject and completely remove the background. Output only the subject on a fully transparent background, with clean, accurate edges. Do not change the subject itself.';
+
+function decodeDataUrlPng(s: string): Uint8Array {
+    const b64 = s.includes(',') ? s.slice(s.indexOf(',') + 1) : s;
+    return new Uint8Array(Buffer.from(b64, 'base64'));
+}
+
+app.post('/api/conversations/:id/edit', async (c) => {
+    const conversationId = c.req.param('id');
+    const userId = c.get('userId');
+    ownedConversation(userId, conversationId);
+    const body = await c.req.json<{
+        imageId: string;
+        op: 'inpaint' | 'erase' | 'outpaint' | 'cutout';
+        maskPng?: string; // 选区 PNG（data URL 或 base64）：不透明处=要编辑
+        prompt?: string; // 标记改图时的中文指令
+        direction?: Dir; // 扩图方向
+        ratio?: number; // 扩图比例（0.1~1）
+    }>();
+    if (!body.imageId || !body.op) return c.json({ error: '参数不足' }, 400);
+
+    const src = await loadSourceImage(body.imageId);
+    if (!src) return c.json({ error: '原图不存在或文件丢失' }, 404);
+
+    // 局部编辑固定用 gpt-image（支持 mask / 透明背景；Gemini 不支持蒙版）
+    const modelSpec = { model: config.ai.editModel, size: null as string | null };
+
+    const opLabel: Record<typeof body.op, string> = {
+        inpaint: `标记改图：${body.prompt ?? ''}`.trim(),
+        erase: '擦除选中区域',
+        outpaint: `扩图（${body.direction ?? 'all'}）`,
+        cutout: '抠图（去背景）',
+    };
+
+    const produce = async (signal: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string }> => {
+        const baseRGBA = await toPngRGBA(Buffer.from(src.bytes));
+
+        if (body.op === 'cutout') {
+            return editImage(CUTOUT_PROMPT, baseRGBA, undefined, modelSpec, { background: 'transparent' }, signal);
+        }
+
+        if (body.op === 'outpaint') {
+            const dir = (body.direction ?? 'all') as Dir;
+            const ratio = Math.min(1, Math.max(0.1, body.ratio ?? 0.5));
+            const { paddedBase, selection, width, height } = await padForOutpaint(baseRGBA, dir, ratio);
+            const editMask = await buildEditMask(selection, width, height);
+            const promptEn = body.prompt?.trim()
+                ? await translateEditInstruction(body.prompt.trim())
+                : OUTPAINT_PROMPT;
+            // 直接用模型的整张连贯输出（不再把外圈拼回原图，避免出现接缝矩形框）
+            return editImage(promptEn, paddedBase, editMask, modelSpec, undefined, signal);
+        }
+
+        // inpaint / erase：都需要蒙版
+        if (!body.maskPng) throw new Error('缺少选区蒙版');
+        const selection = Buffer.from(decodeDataUrlPng(body.maskPng));
+        const { width, height } = await pngDims(baseRGBA);
+        // 擦除：把选区向外扩一圈，连带把紧邻的阴影/接触痕纳入，减少“物体没了影子还在”
+        const editSel = body.op === 'erase' ? await dilateSelection(selection, width, height, 16) : selection;
+        const editMask = await buildEditMask(editSel, width, height);
+        const promptEn =
+            body.op === 'erase'
+                ? ERASE_PROMPT
+                : await translateEditInstruction((body.prompt ?? '').trim() || 'edit the selected area');
+        const out = await editImage(promptEn, baseRGBA, editMask, modelSpec, undefined, signal);
+        const composited = await compositeMasked(baseRGBA, Buffer.from(out.bytes), editSel, 6);
+        return { bytes: new Uint8Array(composited), contentType: 'image/png' };
+    };
+
+    const message = startGeneration({
+        userId,
+        conversationId,
+        promptCn: opLabel[body.op],
+        promptEn: '',
+        sourceImageIds: [body.imageId],
+        modelId: 'quality',
+        produce,
     });
     return c.json({ messages: [message] });
 });

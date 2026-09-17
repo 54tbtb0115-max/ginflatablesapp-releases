@@ -58,14 +58,17 @@ export type GalleryPage = {
 
 // 生成请求：selected 是用户勾选的关键词（按分组），note 是补充说明
 // 带 sourceImageId 即图生图（以该图为参考进行编辑式生成）
+// 参考图角色：主体(保留)/场景背景/风格参考/一般参考
+export type RefRole = 'subject' | 'scene' | 'style' | 'ref';
+
 export type GenerateRequest = {
     selected: Record<string, string[]>;
     note?: string;
     sourceImageId?: string;
     // 多参考图；有值时优先于 sourceImageId
     sourceImageIds?: string[];
-    // 精确模式：只按用户指令处理，不做风格改写、不额外发挥
-    faithful?: boolean;
+    // 与 sourceImageIds 一一对应的角色
+    sourceRoles?: RefRole[];
     modelId?: string;
 };
 

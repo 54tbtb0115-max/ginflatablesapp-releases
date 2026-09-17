@@ -14,8 +14,8 @@ const PLAN_SYSTEM_PROMPT = `你是一个 AI 绘画助手。用户发来一条消
 输出格式：{"mode": "chat", "reply": "一句自然的中文回应"}
 
 情况 A（direct，直接生成）：用户明确要求生成或修改图片，且指令已经足够明确。典型例子：对上一张图的修改（"再大一点""改成夜晚""换成红色""去掉背景里的人"）、要求很具体的完整画面描述、指出上一张图漏掉或画错了某个要素要求重画（"充气拱门呢""你没画拱门"）、以及你上一轮已经答应要生成/重新设计之后用户的催促或确认（"好""可以""开始吧""做好了吗""生成吧"）——这些都要立刻用 direct 真正出图，不能只用文字回应。
-输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "完整的英文绘画提示词", "useLastImage": true 或 false}
-- prompt：结合对话上下文写出完整、具体的英文提示词，风格为真实照片而非营销渲染图。除非用户明确要求卡通/插画风，否则遵循纪实写实公式：以 "Wide/Close-up documentary photograph of ..." 开头，用自然光和真实材质质感，结尾加 "Realistic photography, sharp detail"，并在不与需求冲突时补上 no readable text, no logos（画面本就没有人物时才加 no visible faces；用户想要人物则保留并描述自然的姿态）；如果是修改上一张图，写成对那张图的英文编辑指令（例如 "Make the inflatable castle much larger..."）
+输出格式：{"mode": "direct", "reply": "一句简短的中文回应，说明你要做什么", "prompt": "忠实的英文提示词", "useLastImage": true 或 false}
+- prompt：把用户这次的要求**忠实**翻译成清晰的英文指令，只表达用户真正说的内容。铁律：不要自行添加用户没提的风格、光线、镜头、构图、背景、颜色或画质词；不要套用"documentary photograph / realistic photography"之类的固定摄影公式；不要替用户发挥或补充元素。用户怎么说就怎么译，说得简单就译得简单。如果是修改上一张图或参考图，写成对那张图的忠实编辑指令，并说明"只改用户要求的部分，其它保持不变"。
 - useLastImage：这次生成是否应该基于上一张图片修改（对已有图微调 = true；画全新的画面 = false）
 
 情况 B（keywords，需要细化）：仅当用户想画全新画面、但描述非常模糊（比如只说"画个城堡""来张海报"这种缺主体/场景/风格信息的），才用关键词让用户挑选来补全。只要用户已经把想要的画面说清楚了（哪怕是新画面），就不要用 keywords，直接用 direct 出图，忠实按用户说的来。
@@ -59,14 +59,66 @@ STRICT RULES:
 Output ONLY the English instruction, no quotes, no explanation.`;
 
 // 有参考图时追加的硬约束：只改要求的部分，其余保持不变
-const FAITHFUL_EDIT_GUARD =
+export const FAITHFUL_EDIT_GUARD =
     ' Strictly follow the instruction. Only modify what is explicitly requested; keep every other part of the provided image(s) exactly unchanged. Do not add, remove, restyle, recolor, or reinvent anything that was not asked for.';
+
+// 真实感层：只提升"像真实照片"的渲染质量、去 AI 味，绝不添加用户没说的内容/元素/风格
+// 面向营销图：产品保持干净崭新，但拍得像真实照片而非 CGI 渲染
+export const REALISM_LAYER =
+    ' Render it as a natural, high-quality real-world photograph rather than a CGI render: realistic daylight, soft natural shadows, correct scale, perspective and believable ground contact. The product itself must look brand-new, spotless and vividly colored — absolutely no dirt, dust, stains, smudges, scuffs, wear, fading or discoloration on it. Avoid an obviously AI-generated look: no plastic or waxy surfaces, no over-smoothing, no over-saturation or HDR glow, no unnatural symmetry, no fake bokeh, and no garbled text or logos.';
+
+// 用户明确要求这些非写实风格时，就不要套真实感层，按用户的风格来
+export const NON_PHOTO_STYLE_HINT =
+    /卡通|动画|插画|漫画|二次元|扁平|矢量|图标|icon|logo|线稿|简笔|手绘|水彩|油画|素描|渲染|3\s?d|q版|像素|贴纸|涂鸦|卡哇伊|梦幻|赛博|抽象/i;
+
+// 参考图角色 → 告诉模型每张图是干嘛的（多图合成的关键）
+export type RefRole = 'subject' | 'scene' | 'style' | 'ref';
+const ROLE_DESC: Record<RefRole, string> = {
+    subject: 'the main product/subject — reproduce it faithfully and keep its shape, color and details unchanged',
+    scene: 'the background scene/environment to place the subject into',
+    style: 'a style/color/mood reference to imitate (do not copy its objects)',
+    ref: 'a general reference',
+};
+
+// 生成"每张图是什么角色"的英文前缀，拼在指令前面
+export function refRolePreamble(roles: RefRole[]): string {
+    if (roles.length === 0) return '';
+    const lines = roles.map((r, i) => `Image ${i + 1} is ${ROLE_DESC[r] ?? ROLE_DESC.ref}.`).join(' ');
+    return `You are given ${roles.length} reference image(s) in order. ${lines} Use them exactly according to the following instruction. `;
+}
 
 const apiHeaders = (): Record<string, string> => ({
     'Content-Type': 'application/json',
     Authorization: `Bearer ${config.ai.apiKey}`,
     'x-goog-api-key': config.ai.apiKey,
 });
+
+// 带重试的 fetch：图像接口经代理容易出现瞬时 fetch failed / 连接重置 / 5xx / 429，自动重发几次
+// 用户主动取消(AbortError)不重试
+async function fetchRetry(url: string, init: RequestInit, tries = 3): Promise<Response> {
+    let lastErr: unknown;
+    for (let i = 0; i < tries; i++) {
+        try {
+            const res = await fetch(url, init);
+            // 5xx / 429 视为瞬时，重试；其余(含 4xx)直接返回给调用方处理
+            if ((res.status >= 500 || res.status === 429) && i < tries - 1) {
+                await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+                continue;
+            }
+            return res;
+        } catch (err) {
+            lastErr = err;
+            const aborted =
+                (err instanceof Error && err.name === 'AbortError') ||
+                (init.signal as AbortSignal | undefined)?.aborted;
+            if (aborted || i === tries - 1) throw err;
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`fetch 第 ${i + 1} 次失败(${msg.slice(0, 80)})，${1.5 * (i + 1)}s 后重试`);
+            await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+        }
+    }
+    throw lastErr;
+}
 
 function extractJson(text: string): unknown {
     const start = text.indexOf('{');
@@ -83,7 +135,7 @@ const TEXT_MAX_TOKENS_RETRY = 8192;
 async function runTextModel(system: string, history: HistoryEntry[], user: string): Promise<string> {
     let lastContent = '';
     for (const maxTokens of [TEXT_MAX_TOKENS, TEXT_MAX_TOKENS_RETRY]) {
-        const res = await fetch(`${config.ai.baseUrl}/v1/chat/completions`, {
+        const res = await fetchRetry(`${config.ai.baseUrl}/v1/chat/completions`, {
             method: 'POST',
             headers: apiHeaders(),
             body: JSON.stringify({
@@ -255,14 +307,8 @@ export async function generateImage(
     }
 
     const imageSize = size;
-    // 多图时明确告诉模型每张图的顺序（Image 1 / Image 2 …），便于“图一是参考、在图二上改”这类指令
-    const leadText =
-        sources.length > 1
-            ? `You are given ${sources.length} images below, in order: ${sources
-                  .map((_, i) => `Image ${i + 1}`)
-                  .join(', ')}. Follow the instruction about which image is the reference and which is the one to edit. ${promptEn}`
-            : promptEn;
-    const parts: unknown[] = [{ text: leadText }];
+    // 每张图的“角色说明”已由上层(app.ts)按用户选择拼进 promptEn，这里直接用
+    const parts: unknown[] = [{ text: promptEn }];
     for (const source of sources) {
         parts.push({
             inline_data: { mime_type: source.contentType, data: Buffer.from(source.bytes).toString('base64') },
@@ -272,7 +318,7 @@ export async function generateImage(
     const generationConfig: Record<string, unknown> = { responseModalities: ['TEXT', 'IMAGE'] };
     if (imageSize) generationConfig.imageConfig = { imageSize };
 
-    const res = await fetch(`${config.ai.baseUrl}/v1beta/models/${model}:generateContent`, {
+    const res = await fetchRetry(`${config.ai.baseUrl}/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: apiHeaders(),
         signal,
@@ -323,9 +369,9 @@ async function generateImageOpenAI(
         form.append('size', size);
         form.append('n', '1');
         form.append('image', new Blob([source.bytes], { type: source.contentType }), 'image.png');
-        res = await fetch(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form, signal });
+        res = await fetchRetry(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form, signal });
     } else {
-        res = await fetch(`${config.ai.baseUrl}/v1/images/generations`, {
+        res = await fetchRetry(`${config.ai.baseUrl}/v1/images/generations`, {
             method: 'POST',
             headers: { ...auth, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, prompt: promptEn, size, n: 1 }),
@@ -333,7 +379,12 @@ async function generateImageOpenAI(
         });
     }
 
-    if (!res.ok) throw new Error(`生图请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
+    return parseOpenAIImageResponse(res);
+}
+
+// 解析 OpenAI 图像接口返回（b64 或 url）
+async function parseOpenAIImageResponse(res: Response): Promise<{ bytes: Uint8Array; contentType: string }> {
+    if (!res.ok) throw new Error(`图像请求失败（${res.status}）：${(await res.text()).slice(0, 300)}`);
     const data = (await res.json()) as { data?: { b64_json?: string; url?: string }[] };
     const item = data.data?.[0];
     if (item?.b64_json) {
@@ -345,5 +396,39 @@ async function generateImageOpenAI(
         const contentType = imgRes.headers.get('content-type') ?? 'image/png';
         return { bytes: new Uint8Array(await imgRes.arrayBuffer()), contentType };
     }
-    throw new Error('生图模型没有返回图片');
+    throw new Error('图像模型没有返回图片');
+}
+
+// 局部编辑 / 抠图：走 gpt-image 的 /v1/images/edits
+// - image：底图 PNG（RGBA）；mask：可选蒙版 PNG（透明处=要编辑）；background='transparent' 用于抠图
+export async function editImage(
+    promptEn: string,
+    image: Uint8Array,
+    mask: Uint8Array | undefined,
+    spec: { model: string; size: string | null },
+    opts?: { background?: 'transparent' | 'opaque' | 'auto' },
+    signal?: AbortSignal
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const size = spec.size && /^\d+x\d+$/.test(spec.size) ? spec.size : 'auto';
+    const form = new FormData();
+    form.append('model', spec.model);
+    form.append('prompt', promptEn);
+    form.append('size', size);
+    form.append('n', '1');
+    if (opts?.background) form.append('background', opts.background);
+    form.append('image', new Blob([image], { type: 'image/png' }), 'image.png');
+    if (mask) form.append('mask', new Blob([mask], { type: 'image/png' }), 'mask.png');
+    const res = await fetchRetry(`${config.ai.baseUrl}/v1/images/edits`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${config.ai.apiKey}` },
+        body: form,
+        signal,
+    });
+    return parseOpenAIImageResponse(res);
+}
+
+// 把编辑指令忠实译成英文（用于标记改图）；固定的擦除/抠图指令直接内置，无需翻译
+export async function translateEditInstruction(userText: string): Promise<string> {
+    const en = (await runTextModel(FAITHFUL_TRANSLATE_SYSTEM, [], userText)).trim().replace(/^["'\s]+|["'\s]+$/g, '');
+    return `${en}${FAITHFUL_EDIT_GUARD}`;
 }

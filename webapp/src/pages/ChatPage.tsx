@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import type { Conversation, ImageModelOption, KeywordsContent, Message } from '../../shared/types';
+import type { Conversation, ImageModelOption, KeywordsContent, Message, RefRole } from '../../shared/types';
 import { imageUrl } from '../../shared/types';
+
+type Ref = { id: string; role: RefRole };
+const ROLE_LABELS: { id: RefRole; label: string }[] = [
+    { id: 'subject', label: '主体/产品' },
+    { id: 'scene', label: '场景/背景' },
+    { id: 'style', label: '风格参考' },
+    { id: 'ref', label: '一般参考' },
+];
 import Logo from '../components/Logo';
+import ImageEditor from '../components/ImageEditor';
 import { api } from '../lib/api';
 
 type Busy = 'idle' | 'thinking' | 'generating';
@@ -14,32 +23,17 @@ export default function ChatPage() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [busy, setBusy] = useState<Busy>('idle');
     const [error, setError] = useState<string | null>(null);
-    // 图生图的参考图：来自图库「再创作」、聊天内图片、或本地上传（可多张：图一参考、图二画布…）
-    const [refImageIds, setRefImageIds] = useState<string[]>(() => {
+    // 参考图（可多张，每张带角色：主体/场景/风格）：来自图库「再创作」、聊天图片、或本地上传
+    const [refs, setRefs] = useState<Ref[]>(() => {
         const fromGallery = (location.state as { refImageId?: string } | null)?.refImageId;
-        return fromGallery ? [fromGallery] : [];
+        return fromGallery ? [{ id: fromGallery, role: 'subject' }] : [];
     });
-    const addRef = (id: string) => setRefImageIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
-    const removeRef = (id: string) => setRefImageIds((ids) => ids.filter((x) => x !== id));
-    // 精确模式：只按用户指令处理，不做风格改写、不额外发挥
-    const [faithful, setFaithful] = useState<boolean>(() => {
-        try {
-            return localStorage.getItem('faithfulMode') === '1';
-        } catch {
-            return false;
-        }
-    });
-    const toggleFaithful = () => {
-        setFaithful((v) => {
-            const next = !v;
-            try {
-                localStorage.setItem('faithfulMode', next ? '1' : '0');
-            } catch {
-                /* 忽略 */
-            }
-            return next;
-        });
-    };
+    // 新增参考图：第一张默认「主体/产品」，之后默认「场景/背景」（贴合"把产品放进场景"）
+    const addRef = (id: string) =>
+        setRefs((rs) => (rs.some((r) => r.id === id) ? rs : [...rs, { id, role: rs.length === 0 ? 'subject' : 'scene' }]));
+    const removeRef = (id: string) => setRefs((rs) => rs.filter((r) => r.id !== id));
+    const setRefRole = (id: string, role: RefRole) =>
+        setRefs((rs) => rs.map((r) => (r.id === id ? { ...r, role } : r)));
     // 生图模型选择：每个会话独立记忆（存本地）；未建会话时用 __new__ 这个键
     const [models, setModels] = useState<ImageModelOption[]>([]);
     const [defaultModelId, setDefaultModelId] = useState('');
@@ -64,6 +58,8 @@ export default function ChatPage() {
             return next;
         });
     };
+    // 打开局部编辑器的目标图片 id
+    const [editingImageId, setEditingImageId] = useState<string | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
     // 防止请求返回时用户已切到别的会话，把消息插错地方
     const activeIdRef = useRef<string | null>(null);
@@ -139,7 +135,7 @@ export default function ChatPage() {
             const { conversation } = await api.createConversation();
             setConversations((cs) => [conversation, ...cs]);
             setActiveId(conversation.id);
-            setRefImageIds([]);
+            setRefs([]);
         } catch (e) {
             setError((e as Error).message);
         }
@@ -150,16 +146,14 @@ export default function ChatPage() {
         setBusy('thinking');
         try {
             const id = await ensureConversation();
-            const { messages: newMessages } = await api.chat(
-                id,
-                text,
-                refImageIds.length > 0 ? refImageIds : undefined,
+            const { messages: newMessages } = await api.chat(id, text, {
+                sourceImageIds: refs.length > 0 ? refs.map((r) => r.id) : undefined,
+                sourceRoles: refs.length > 0 ? refs.map((r) => r.role) : undefined,
                 modelId,
-                faithful
-            );
+            });
             if (activeIdRef.current === id) setMessages((ms) => [...ms, ...newMessages]);
             // AI 判断为明确指令时会直接返回生成的图片，此时参考图已被使用
-            if (newMessages.some((m) => m.type === 'image')) setRefImageIds([]);
+            if (newMessages.some((m) => m.type === 'image')) setRefs([]);
             setConversations((cs) =>
                 cs.map((c) => (c.id === id && c.title === '新会话' ? { ...c, title: text.slice(0, 20) } : c))
             );
@@ -178,12 +172,12 @@ export default function ChatPage() {
             const { messages: newMessages } = await api.generate(activeId, {
                 selected,
                 note: note || undefined,
-                sourceImageIds: refImageIds.length > 0 ? refImageIds : undefined,
-                faithful,
+                sourceImageIds: refs.length > 0 ? refs.map((r) => r.id) : undefined,
+                sourceRoles: refs.length > 0 ? refs.map((r) => r.role) : undefined,
                 modelId,
             });
             if (activeIdRef.current === activeId) setMessages((ms) => [...ms, ...newMessages]);
-            setRefImageIds([]);
+            setRefs([]);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -241,21 +235,31 @@ export default function ChatPage() {
                 messages={messages}
                 busy={busy}
                 error={error}
-                refImageIds={refImageIds}
-                faithful={faithful}
-                onToggleFaithful={toggleFaithful}
+                refs={refs}
                 models={models}
                 modelId={modelId}
                 onModelChange={chooseModel}
                 onRemoveRef={removeRef}
+                onSetRole={setRefRole}
                 onUseAsRef={addRef}
                 onSend={sendText}
                 onGenerate={generate}
                 onUpload={uploadReferences}
                 onHd={hdRegen}
+                onEdit={setEditingImageId}
                 onCancel={cancelGen}
                 bottomRef={bottomRef}
             />
+            {editingImageId && activeId && (
+                <ImageEditor
+                    conversationId={activeId}
+                    imageId={editingImageId}
+                    onClose={() => setEditingImageId(null)}
+                    onResult={(msgs) =>
+                        setMessages((ms) => [...ms, ...msgs.filter((m) => !ms.some((x) => x.id === m.id))])
+                    }
+                />
+            )}
         </div>
     );
 }
@@ -312,36 +316,36 @@ function ChatWindow({
     messages,
     busy,
     error,
-    refImageIds,
-    faithful,
-    onToggleFaithful,
+    refs,
     models,
     modelId,
     onModelChange,
     onRemoveRef,
+    onSetRole,
     onUseAsRef,
     onSend,
     onGenerate,
     onUpload,
     onHd,
+    onEdit,
     onCancel,
     bottomRef,
 }: {
     messages: Message[];
     busy: Busy;
     error: string | null;
-    refImageIds: string[];
-    faithful: boolean;
-    onToggleFaithful: () => void;
+    refs: Ref[];
     models: ImageModelOption[];
     modelId: string;
     onModelChange: (id: string) => void;
     onRemoveRef: (id: string) => void;
+    onSetRole: (id: string, role: RefRole) => void;
     onUseAsRef: (id: string) => void;
     onSend: (text: string) => void;
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUpload: (files: File[]) => void;
     onHd: (imageId: string) => void;
+    onEdit: (imageId: string) => void;
     onCancel: (messageId: string) => void;
     bottomRef: React.RefObject<HTMLDivElement>;
 }) {
@@ -370,7 +374,7 @@ function ChatWindow({
             <div className="px-6 py-4 border-b border-slate-100 dark:border-zinc-600">
                 <h5 className="text-gray-700 dark:text-gray-50">聊天生图</h5>
                 <p className="text-xs text-gray-400 mt-0.5">
-                    直接描述画面即可生成；可上传多张参考图（图一参考、图二画布…）。开「精确模式」则严格按你的指令执行，不额外发挥
+                    直接用中文说你要什么图，它就严格按你说的画；要合成就传参考图，并标好每张是「主体/场景/风格」
                 </p>
             </div>
 
@@ -384,6 +388,7 @@ function ChatWindow({
                         onGenerate={onGenerate}
                         onUseAsRef={onUseAsRef}
                         onHd={onHd}
+                        onEdit={onEdit}
                         onCancel={onCancel}
                     />
                 ))}
@@ -397,31 +402,42 @@ function ChatWindow({
                 <div ref={bottomRef} />
             </div>
 
-            {refImageIds.length > 0 && (
+            {refs.length > 0 && (
                 <div className="mx-4 lg:mx-6 mb-2 rounded-lg bg-violet-500/10 px-3 py-2">
                     <p className="text-xs text-gray-500 dark:text-gray-200 mb-2">
-                        {refImageIds.length === 1
-                            ? '已设为参考图，生成时以它为基础'
-                            : `已选 ${refImageIds.length} 张参考图，按顺序为 图一…图${refImageIds.length}，可在指令里说明各自用途`}
+                        参考图（{refs.length} 张）——给每张选个角色，AI 会知道它是干嘛的：
                     </p>
-                    <div className="flex flex-wrap gap-2">
-                        {refImageIds.map((id, i) => (
-                            <div key={id} className="relative">
-                                <img
-                                    src={imageUrl(id)}
-                                    alt={`参考图${i + 1}`}
-                                    className="h-16 w-16 rounded object-cover"
-                                />
-                                <span className="absolute left-0 top-0 rounded-br bg-black/60 px-1 text-[10px] text-white">
-                                    图{i + 1}
-                                </span>
-                                <button
-                                    onClick={() => onRemoveRef(id)}
-                                    className="absolute -right-1.5 -top-1.5 rounded-full bg-white dark:bg-zinc-700 text-gray-400 hover:text-red-500 shadow"
-                                    title="移除这张参考图"
+                    <div className="flex flex-wrap gap-3">
+                        {refs.map((r, i) => (
+                            <div key={r.id} className="w-20">
+                                <div className="relative">
+                                    <img
+                                        src={imageUrl(r.id)}
+                                        alt={`参考图${i + 1}`}
+                                        className="h-20 w-20 rounded object-cover"
+                                    />
+                                    <span className="absolute left-0 top-0 rounded-br bg-black/60 px-1 text-[10px] text-white">
+                                        图{i + 1}
+                                    </span>
+                                    <button
+                                        onClick={() => onRemoveRef(r.id)}
+                                        className="absolute -right-1.5 -top-1.5 rounded-full bg-white dark:bg-zinc-700 text-gray-400 hover:text-red-500 shadow"
+                                        title="移除这张参考图"
+                                    >
+                                        <i className="ri-close-circle-fill text-lg" aria-hidden />
+                                    </button>
+                                </div>
+                                <select
+                                    value={r.role}
+                                    onChange={(e) => onSetRole(r.id, e.target.value as RefRole)}
+                                    className="mt-1 w-full rounded border-0 bg-white dark:bg-zinc-600 dark:text-gray-100 text-[11px] py-1 px-1 focus:ring-violet-500"
                                 >
-                                    <i className="ri-close-circle-fill text-lg" aria-hidden />
-                                </button>
+                                    {ROLE_LABELS.map((o) => (
+                                        <option key={o.id} value={o.id}>
+                                            {o.label}
+                                        </option>
+                                    ))}
+                                </select>
                             </div>
                         ))}
                     </div>
@@ -450,18 +466,6 @@ function ChatWindow({
                             </div>
                         </div>
                     )}
-                    <button
-                        onClick={onToggleFaithful}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs transition-colors ${
-                            faithful
-                                ? 'bg-violet-500 text-white'
-                                : 'bg-slate-100 dark:bg-zinc-700 text-gray-500 dark:text-gray-300 hover:text-violet-500'
-                        }`}
-                        title="开启后严格按你的指令执行：不改写、不加风格、不额外发挥；改图时只动你要求的部分"
-                    >
-                        <i className={faithful ? 'ri-focus-3-fill' : 'ri-focus-3-line'} aria-hidden />
-                        精确模式{faithful ? '·开' : ''}
-                    </button>
                 </div>
                 <div className="flex items-end gap-2">
                     <button
@@ -521,8 +525,8 @@ function EmptyState() {
                 <Logo size={64} />
             </div>
             <p className="max-w-sm text-sm leading-6">
-                用一句话描述你想要的画面即可直接生成；描述太模糊时 AI 才会让你挑关键词补全。
-                可上传多张参考图做图生图，开「精确模式」则严格照你的指令来。生成的每张图都会保存到图库。
+                用中文直接说你要什么图，它会严格照你说的画，不自作主张。
+                要把产品放进场景就传参考图，并给每张标上「主体 / 场景 / 风格」。生成的每张图都会保存到图库。
             </p>
         </div>
     );
@@ -545,6 +549,7 @@ function MessageBubble({
     onGenerate,
     onUseAsRef,
     onHd,
+    onEdit,
     onCancel,
 }: {
     message: Message;
@@ -552,6 +557,7 @@ function MessageBubble({
     onGenerate: (selected: Record<string, string[]>, note: string) => void;
     onUseAsRef: (id: string) => void;
     onHd: (imageId: string) => void;
+    onEdit: (imageId: string) => void;
     onCancel: (messageId: string) => void;
 }) {
     const mine = message.role === 'user';
@@ -613,6 +619,13 @@ function MessageBubble({
                         >
                             <i className="ri-download-2-line" aria-hidden />
                         </a>
+                        <button
+                            onClick={() => onEdit(message.content.imageId)}
+                            className="hover:text-violet-500"
+                            title="编辑（标记改图 / 擦除 / 扩图 / 抠图）"
+                        >
+                            <i className="ri-edit-2-line" aria-hidden />
+                        </button>
                         <button
                             onClick={() => onUseAsRef(message.content.imageId)}
                             className="hover:text-violet-500"
