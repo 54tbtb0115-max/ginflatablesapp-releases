@@ -57,6 +57,14 @@ export const config = {
                 model: process.env.GEMINI_FAST_IMAGE_MODEL ?? 'gemini-2.5-flash-image',
                 size: process.env.GEMINI_IMAGE_SIZE || null,
             },
+            {
+                // gpt-image 写实度最好；注意 OpenAI 编辑接口只收一张参考图（多张时取最后一张）
+                id: 'gpt',
+                label: '写实（GPT Image）',
+                api: 'openai' as const,
+                model: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
+                size: process.env.OPENAI_IMAGE_SIZE || null,
+            },
         ],
         defaultModelId: process.env.DEFAULT_IMAGE_MODEL ?? 'quality',
         // 局部编辑（标记改图/擦除/扩图/抠图）需要 mask，只能用 gpt-image
