@@ -22,10 +22,12 @@ export const config = {
         } catch {
             /* 用默认 */
         }
+        // 2026-09-17 按 aiberm 实际扣费回算：gpt-image-2 按输出 token 计费，quality=high(auto) 时一张 ≈$0.10，
+        // medium ≈$0.035；gemini-3-pro 每张固定 ≈$0.045；flash-image ≈$0.02
         return {
-            'gpt-image-2': 0.036,
-            'gemini-2.5-flash-image': 0.023,
-            'gemini-3-pro-image-preview': 0.055,
+            'gpt-image-2': 0.035,
+            'gemini-2.5-flash-image': 0.02,
+            'gemini-3-pro-image-preview': 0.045,
         };
     })(),
     // 自定义 DNS 服务器（逗号分隔），留空则用系统默认
@@ -59,6 +61,9 @@ export const config = {
         defaultModelId: process.env.DEFAULT_IMAGE_MODEL ?? 'quality',
         // 局部编辑（标记改图/擦除/扩图/抠图）需要 mask，只能用 gpt-image
         editModel: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
+        // gpt-image 按输出 token 计费，quality 决定一张图吃多少 token：low≈270 / medium≈1000 / high≈4000+
+        // 不传时接口默认 auto≈high，一张要 $0.10 左右；默认 medium 够用且便宜 3 倍
+        openaiQuality: (process.env.OPENAI_IMAGE_QUALITY ?? 'medium') as 'low' | 'medium' | 'high' | 'auto',
     },
     r2:
         process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && process.env.R2_BUCKET

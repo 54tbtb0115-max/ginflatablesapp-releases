@@ -367,6 +367,7 @@ async function generateImageOpenAI(
         form.append('model', model);
         form.append('prompt', promptEn);
         form.append('size', size);
+        form.append('quality', config.ai.openaiQuality);
         form.append('n', '1');
         form.append('image', new Blob([source.bytes], { type: source.contentType }), 'image.png');
         res = await fetchRetry(`${config.ai.baseUrl}/v1/images/edits`, { method: 'POST', headers: auth, body: form, signal });
@@ -374,7 +375,7 @@ async function generateImageOpenAI(
         res = await fetchRetry(`${config.ai.baseUrl}/v1/images/generations`, {
             method: 'POST',
             headers: { ...auth, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, prompt: promptEn, size, n: 1 }),
+            body: JSON.stringify({ model, prompt: promptEn, size, quality: config.ai.openaiQuality, n: 1 }),
             signal,
         });
     }
@@ -414,6 +415,7 @@ export async function editImage(
     form.append('model', spec.model);
     form.append('prompt', promptEn);
     form.append('size', size);
+    form.append('quality', config.ai.openaiQuality);
     form.append('n', '1');
     if (opts?.background) form.append('background', opts.background);
     form.append('image', new Blob([image], { type: 'image/png' }), 'image.png');
